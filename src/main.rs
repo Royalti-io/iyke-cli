@@ -84,6 +84,22 @@ enum Command {
         #[arg(long)]
         pane_id: Option<String>,
     },
+
+    /// Resize the main window. Pass either `<W>x<H>` (e.g. `1600x1000`) or
+    /// a preset: `maximize`, `unmaximize`, `fullscreen`, `unfullscreen`,
+    /// `minimize`.
+    Resize {
+        /// `<W>x<H>` or a preset name.
+        target: String,
+    },
+
+    /// Refresh a pane's content (re-mount via React key bump). Defaults to
+    /// the focused pane.
+    Refresh {
+        /// Optional pane id. Defaults to focused.
+        #[arg(long)]
+        pane_id: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -125,6 +141,40 @@ impl SplitDirection {
             Self::Vertical => "vertical",
         }
     }
+}
+
+/// `1600x1000` → `(label, json)` for explicit size; preset keyword →
+/// `(label, { "preset": <kw> })`. Anything else is a hard error so users
+/// see a typo immediately rather than getting a server-side 400.
+fn parse_resize_target(target: &str) -> Result<(String, serde_json::Value)> {
+    const PRESETS: &[&str] = &[
+        "maximize",
+        "unmaximize",
+        "fullscreen",
+        "unfullscreen",
+        "minimize",
+    ];
+    if PRESETS.contains(&target) {
+        return Ok((
+            format!("resize {target}"),
+            json!({ "preset": target }),
+        ));
+    }
+    if let Some((w, h)) = target.split_once('x') {
+        let w: u32 = w
+            .parse()
+            .map_err(|_| anyhow!("invalid width in {target:?}: expected integer"))?;
+        let h: u32 = h
+            .parse()
+            .map_err(|_| anyhow!("invalid height in {target:?}: expected integer"))?;
+        return Ok((
+            format!("resize {w}x{h}"),
+            json!({ "width": w, "height": h }),
+        ));
+    }
+    Err(anyhow!(
+        "could not parse resize target {target:?}: expected `<W>x<H>` or one of {PRESETS:?}"
+    ))
 }
 
 fn main() {
@@ -224,6 +274,23 @@ fn run() -> Result<()> {
             };
             let v = client.post("/iyke/focus", body)?;
             print_write_result(&label, &v, fmt);
+        }
+        Command::Resize { target } => {
+            let (label, body) = parse_resize_target(&target)?;
+            let v = client.post("/iyke/resize", body)?;
+            print_write_result(&label, &v, fmt);
+        }
+        Command::Refresh { pane_id } => {
+            let body = match pane_id.as_ref() {
+                Some(id) => json!({ "pane_id": id }),
+                None => json!({}),
+            };
+            let v = client.post("/iyke/refresh", body)?;
+            print_write_result(
+                &format!("refresh{}", pane_id.map(|id| format!(" {id}")).unwrap_or_default()),
+                &v,
+                fmt,
+            );
         }
         Command::Close { pane_id } => {
             let body = match pane_id {
