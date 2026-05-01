@@ -47,7 +47,58 @@ pub fn print_state(value: &Value, fmt: Format) {
             }
             println!("  mode:    {mode}");
             println!("  route:   {route}");
+
+            print_panes(shell.and_then(|v| v.get("panes")));
         }
+    }
+}
+
+/// Phase 12 PR-E. The pane snapshot has shape:
+///   { leaves: [{ id, focused, activeTabIdx, tabs:[{kind,title}] }],
+///     tree:   <opaque PaneNode> }
+/// We render the flat leaf list — humans care about "what's open where",
+/// not the recursive split structure. The split structure stays in the
+/// JSON output for tools that want it.
+fn print_panes(panes: Option<&Value>) {
+    let Some(panes) = panes else {
+        return;
+    };
+    let Some(leaves) = panes.get("leaves").and_then(|v| v.as_array()) else {
+        return;
+    };
+    if leaves.is_empty() {
+        return;
+    }
+    println!("  panes:   {} open", leaves.len());
+    for leaf in leaves {
+        let id = leaf.get("id").and_then(|v| v.as_str()).unwrap_or("?");
+        let focused = leaf
+            .get("focused")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let active = leaf
+            .get("activeTabIdx")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as usize;
+        let tabs = leaf.get("tabs").and_then(|v| v.as_array());
+        let tab_count = tabs.map(|t| t.len()).unwrap_or(0);
+        let active_label = tabs
+            .and_then(|t| t.get(active))
+            .map(|t| {
+                let kind = t.get("kind").and_then(|v| v.as_str()).unwrap_or("?");
+                let title = t.get("title").and_then(|v| v.as_str()).unwrap_or("");
+                if title.is_empty() {
+                    kind.to_string()
+                } else {
+                    format!("{kind} {title}")
+                }
+            })
+            .unwrap_or_else(|| "(empty)".into());
+        let marker = if focused { "*" } else { " " };
+        let short_id: String = id.chars().take(8).collect();
+        println!(
+            "    {marker} {short_id}  [{active}/{tab_count}] {active_label}"
+        );
     }
 }
 
