@@ -40,8 +40,21 @@ impl Client {
             .agent
             .post(&format!("{}{}", self.base, path))
             .set("Authorization", &format!("Bearer {}", self.token))
+            // Wait commands can run up to 60s; stretch the per-call ceiling.
+            .timeout(std::time::Duration::from_secs(65))
             .send_json(body);
         normalize_response(resp, path)
+    }
+
+    pub fn get_with_query(&self, path: &str, params: &[(&str, String)]) -> Result<Value> {
+        let mut req = self
+            .agent
+            .get(&format!("{}{}", self.base, path))
+            .set("Authorization", &format!("Bearer {}", self.token));
+        for (k, v) in params {
+            req = req.query(k, v);
+        }
+        normalize_response(req.call(), path)
     }
 }
 

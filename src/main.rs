@@ -100,6 +100,142 @@ enum Command {
         #[arg(long)]
         pane_id: Option<String>,
     },
+
+    /// Print an accessibility-tree snapshot of the focused pane (or `--pane`).
+    /// Refs (e.g. `e3`) are stable until the next snapshot or navigation.
+    Dom {
+        /// Substring filter; only entries whose role/name/value match are kept.
+        #[arg(long)]
+        query: Option<String>,
+        /// Include hidden + aria-hidden + zero-size elements.
+        #[arg(long)]
+        all: bool,
+        /// Pane id. Default = focused.
+        #[arg(long)]
+        pane: Option<String>,
+    },
+
+    /// Print recent console + error logs from the running webview.
+    Logs {
+        /// Filter by level: log | info | warn | error | debug.
+        #[arg(long)]
+        level: Option<String>,
+        /// Only entries with `ts >= since` (epoch ms).
+        #[arg(long)]
+        since: Option<u128>,
+        /// Filter by source pane id (e.g. `shell` or a leaf id).
+        #[arg(long)]
+        source: Option<String>,
+    },
+
+    /// Print recent fetch + XHR network activity (last 100).
+    Network {
+        #[arg(long)]
+        since: Option<u128>,
+        #[arg(long)]
+        source: Option<String>,
+    },
+
+    /// Capture a screenshot of the focused pane or the full window.
+    Screenshot {
+        /// Capture target.
+        #[arg(value_enum, default_value = "window")]
+        target: ScreenshotTarget,
+        /// Output path. Default: ~/.local/share/royalti-pa/screenshots/<auto>.png.
+        #[arg(long)]
+        out: Option<String>,
+        /// Pane id when target=pane.
+        #[arg(long)]
+        pane_id: Option<String>,
+    },
+
+    /// Wait until a predicate is satisfied or timeout. Exit non-zero on timeout.
+    Wait {
+        /// Predicate kind: text | selector | ref | gone-text | gone-selector.
+        kind: String,
+        /// Predicate value.
+        value: String,
+        /// Timeout in milliseconds (default 10000, max 60000).
+        #[arg(long)]
+        timeout_ms: Option<u64>,
+        #[arg(long)]
+        pane: Option<String>,
+    },
+
+    /// Click an element. Specify exactly one of `--ref`, `--selector`, `--text`.
+    Click {
+        #[arg(long)]
+        r#ref: Option<String>,
+        #[arg(long)]
+        selector: Option<String>,
+        #[arg(long)]
+        text: Option<String>,
+        #[arg(long)]
+        pane: Option<String>,
+    },
+
+    /// Type text into an input/textarea/contenteditable.
+    Type {
+        /// Text to type.
+        text: String,
+        #[arg(long)]
+        r#ref: Option<String>,
+        #[arg(long)]
+        selector: Option<String>,
+        /// Replace the existing value instead of appending.
+        #[arg(long)]
+        replace: bool,
+        #[arg(long)]
+        pane: Option<String>,
+    },
+
+    /// Dispatch a key combo (e.g. `Enter`, `Ctrl+S`, `Meta+K`).
+    Key {
+        /// Combo string. `+` or `,` separated.
+        combo: String,
+        #[arg(long)]
+        r#ref: Option<String>,
+        #[arg(long)]
+        selector: Option<String>,
+        #[arg(long)]
+        pane: Option<String>,
+    },
+
+    /// Dump the TanStack Query cache: keys, statuses, last update times.
+    QueryCache {
+        #[arg(long)]
+        pane: Option<String>,
+    },
+
+    /// Open Chrome DevTools (debug builds only).
+    Devtools,
+
+    /// Read the latest published state object for an iframe pane (storyboard
+    /// cursor, comp current frame, etc.). Iframes publish via the bridge's
+    /// `publishState(key, value)` API.
+    IframeState {
+        /// Pane id (from `iyke state` shell.panes.leaves[].id).
+        pane: String,
+    },
+
+    /// Send a fire-and-forget postMessage to an iframe pane. Used to drive
+    /// mini-app actions from the terminal — e.g.
+    /// `iyke iframe-send <pane> story-select '{"beatId":"hook"}'`.
+    IframeSend {
+        /// Pane id.
+        pane: String,
+        /// Message kind. Up to the iframe to interpret.
+        kind: String,
+        /// JSON payload. Defaults to null.
+        #[arg(default_value = "null")]
+        payload: String,
+    },
+}
+
+#[derive(Copy, Clone, ValueEnum)]
+enum ScreenshotTarget {
+    Window,
+    Pane,
 }
 
 #[derive(Subcommand)]
@@ -304,7 +440,148 @@ fn run() -> Result<()> {
                 fmt,
             );
         }
+        Command::Dom { query, all, pane } => {
+            let mut q = Vec::new();
+            if let Some(s) = &query {
+                q.push(("query", s.clone()));
+            }
+            if all {
+                q.push(("all", "true".into()));
+            }
+            if let Some(p) = &pane {
+                q.push(("pane", p.clone()));
+            }
+            let v = client.get_with_query("/iyke/dom", &q)?;
+            output::print_dom(&v, fmt);
+        }
+        Command::Logs { level, since, source } => {
+            let mut q = Vec::new();
+            if let Some(s) = &level {
+                q.push(("level", s.clone()));
+            }
+            if let Some(s) = since {
+                q.push(("since", s.to_string()));
+            }
+            if let Some(s) = &source {
+                q.push(("source", s.clone()));
+            }
+            let v = client.get_with_query("/iyke/logs", &q)?;
+            output::print_logs(&v, fmt);
+        }
+        Command::Network { since, source } => {
+            let mut q = Vec::new();
+            if let Some(s) = since {
+                q.push(("since", s.to_string()));
+            }
+            if let Some(s) = &source {
+                q.push(("source", s.clone()));
+            }
+            let v = client.get_with_query("/iyke/network", &q)?;
+            output::print_network(&v, fmt);
+        }
+        Command::Screenshot { target, out, pane_id } => {
+            let path = match target {
+                ScreenshotTarget::Window => "/iyke/screenshot/window",
+                ScreenshotTarget::Pane => "/iyke/screenshot/pane",
+            };
+            let mut body = serde_json::Map::new();
+            if let Some(p) = out {
+                body.insert("out_path".into(), json!(p));
+            }
+            if matches!(target, ScreenshotTarget::Pane) {
+                let id = pane_id
+                    .ok_or_else(|| anyhow!("--pane-id required when target=pane"))?;
+                body.insert("pane_id".into(), json!(id));
+            }
+            let v = client.post(path, serde_json::Value::Object(body))?;
+            output::print_screenshot(&v, fmt);
+        }
+        Command::Wait { kind, value, timeout_ms, pane } => {
+            let body = json!({
+                "kind": kind,
+                "value": value,
+                "timeout_ms": timeout_ms,
+                "pane": pane,
+            });
+            let v = client.post("/iyke/wait", body)?;
+            let satisfied = output::print_wait(&v, fmt);
+            if !satisfied {
+                std::process::exit(2);
+            }
+        }
+        Command::Click { r#ref, selector, text, pane } => {
+            require_one(&r#ref, &selector, &text)?;
+            let body = json!({
+                "ref": r#ref,
+                "selector": selector,
+                "text": text,
+                "pane": pane,
+            });
+            let v = client.post("/iyke/click", body)?;
+            print_write_result("click", &v, fmt);
+        }
+        Command::Type { text, r#ref, selector, replace, pane } => {
+            require_one(&r#ref, &selector, &None)?;
+            let body = json!({
+                "ref": r#ref,
+                "selector": selector,
+                "text": text,
+                "replace": replace,
+                "pane": pane,
+            });
+            let v = client.post("/iyke/type", body)?;
+            print_write_result("type", &v, fmt);
+        }
+        Command::Key { combo, r#ref, selector, pane } => {
+            let body = json!({
+                "combo": combo,
+                "ref": r#ref,
+                "selector": selector,
+                "pane": pane,
+            });
+            let v = client.post("/iyke/key", body)?;
+            print_write_result(&format!("key {combo}"), &v, fmt);
+        }
+        Command::QueryCache { pane } => {
+            let mut q = Vec::new();
+            if let Some(p) = &pane {
+                q.push(("pane", p.clone()));
+            }
+            let v = client.get_with_query("/iyke/query-cache", &q)?;
+            output::print_query_cache(&v, fmt);
+        }
+        Command::Devtools => {
+            let v = client.post("/iyke/devtools", json!({}))?;
+            print_write_result("devtools", &v, fmt);
+        }
+        Command::IframeState { pane } => {
+            let v = client.get_with_query("/iyke/iframe-state", &[("pane", pane.clone())])?;
+            output::print_iframe_state(&v, fmt);
+        }
+        Command::IframeSend { pane, kind, payload } => {
+            let parsed: serde_json::Value = serde_json::from_str(&payload)
+                .map_err(|e| anyhow!("invalid payload JSON: {e}"))?;
+            let v = client.post(
+                "/iyke/iframe-message",
+                json!({ "pane": pane, "kind": kind, "payload": parsed }),
+            )?;
+            print_write_result(&format!("iframe-send {pane} {kind}"), &v, fmt);
+        }
     }
 
+    Ok(())
+}
+
+fn require_one(
+    r#ref: &Option<String>,
+    selector: &Option<String>,
+    text: &Option<String>,
+) -> Result<()> {
+    let count = r#ref.is_some() as u8 + selector.is_some() as u8 + text.is_some() as u8;
+    if count != 1 {
+        return Err(anyhow!(
+            "must supply exactly one of: --ref, --selector, --text"
+        ));
+    }
     Ok(())
 }
