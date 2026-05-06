@@ -1,4 +1,4 @@
-//! `iyke` — CLI for the Royalti PA desktop app's localhost control bridge.
+//! `iyke` — CLI for the Ikenga desktop app's localhost control bridge.
 //!
 //! The desktop app exposes an HTTP server bound to `127.0.0.1:<random>`
 //! with a per-launch bearer token. The token + port are written to a
@@ -25,8 +25,8 @@ use crate::output::{print_state, print_write_result, Format};
 #[command(
     name = "iyke",
     version,
-    about = "Control the Royalti PA desktop app from outside the webview.",
-    long_about = "iyke talks to the localhost control bridge that the PA desktop app exposes. \
+    about = "Control the Ikenga desktop app from outside the webview.",
+    long_about = "iyke talks to the localhost control bridge that the Ikenga desktop app exposes. \
                   Use it to navigate panes, switch sidebar modes, open tabs, and inspect state \
                   from a terminal or script."
 )]
@@ -141,7 +141,7 @@ enum Command {
         /// Capture target.
         #[arg(value_enum, default_value = "window")]
         target: ScreenshotTarget,
-        /// Output path. Default: ~/.local/share/royalti-pa/screenshots/<auto>.png.
+        /// Output path. Default: ~/.local/share/ikenga/screenshots/<auto>.png.
         #[arg(long)]
         out: Option<String>,
         /// Pane id when target=pane.

@@ -1,6 +1,6 @@
 # iyke
 
-CLI for the Royalti PA desktop app's localhost control bridge. The desktop app exposes an HTTP server bound to `127.0.0.1:<random-port>` with a per-launch bearer token; this CLI reads the control file the app writes and forwards subcommands as authenticated HTTP calls. Use it to navigate panes, switch sidebar modes, open tabs, and inspect state from a terminal or script.
+CLI for the Ikenga desktop app's localhost control bridge. The desktop app exposes an HTTP server bound to `127.0.0.1:<random-port>` with a per-launch bearer token; this CLI reads the control file the app writes and forwards subcommands as authenticated HTTP calls. Use it to navigate panes, switch sidebar modes, open tabs, and inspect state from a terminal or script.
 
 ## Install
 

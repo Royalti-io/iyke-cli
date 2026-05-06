@@ -2,7 +2,7 @@
 name = "iyke-cli"
 version = "0.1.0"
 edition = "2021"
-description = "CLI for the Royalti PA desktop app's Iyke localhost control bridge"
+description = "CLI for the Ikenga desktop app's Iyke localhost control bridge"
 authors = ["Royalti"]
 
 [[bin]]
