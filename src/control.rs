@@ -17,7 +17,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::{anyhow, Context, Result};
 use serde::Deserialize;
 
-pub const APP_IDENTIFIER: &str = "io.royalti.pa.desktop";
+pub const APP_IDENTIFIER: &str = "app.ikenga";
 
 /// How long a control.json must have existed before we'll auto-delete it
 /// when the PID is dead. 5 minutes is well past any normal app launch
