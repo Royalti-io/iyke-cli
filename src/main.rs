@@ -230,6 +230,141 @@ enum Command {
         #[arg(default_value = "null")]
         payload: String,
     },
+
+    /// pkg-browser: drive native child webviews (e.g. partner portals
+    /// like Spotify-for-Artists / Bandcamp). Mirrors the
+    /// `@ikenga/mcp-browser` MCP server's tools; useful for scripting,
+    /// debugging, and CI flows where MCP isn't appropriate. By default
+    /// the CLI acts as the `com.ikenga.mcp-browser` pkg — that pkg's
+    /// manifest already declares `capabilities.webview` with wildcard
+    /// partitions. Override with `--pkg-id` if you've installed a
+    /// different webview-capable pkg you'd like the CLI to drive.
+    Browser {
+        /// Pkg id whose webview capability the CLI piggybacks on.
+        /// Defaults to `com.ikenga.mcp-browser`.
+        #[arg(long, global = true, default_value = "com.ikenga.mcp-browser")]
+        pkg_id: String,
+        #[command(subcommand)]
+        action: BrowserAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum BrowserAction {
+    /// Open a child webview pane navigated to `url`. `<pane_id>` is an
+    /// opaque handle you choose (e.g. `spotify`); pass it to subsequent
+    /// commands. Use `--session <name>` to bind to a named cookie jar
+    /// (`iyke browser session create` first), or `--partition <slug>`
+    /// for a raw jar.
+    Open {
+        pane_id: String,
+        url: String,
+        #[arg(long)]
+        session: Option<String>,
+        #[arg(long)]
+        partition: Option<String>,
+        /// `<W>x<H>` for size; defaults to 1024x768. Position defaults to (0,0).
+        #[arg(long, default_value = "1024x768")]
+        rect: String,
+    },
+    /// Close a pane.
+    Close { pane_id: String },
+    /// List open panes for this pkg.
+    List,
+    /// Focus a pane (kernel-side currently a no-op; preserved for forward compat).
+    Focus { pane_id: String },
+    /// Navigate an existing pane.
+    Goto { pane_id: String, url: String },
+    /// History back.
+    Back { pane_id: String },
+    /// History forward.
+    Forward { pane_id: String },
+    /// Reload.
+    Reload { pane_id: String },
+    /// Accessibility-tree snapshot.
+    Snapshot {
+        pane_id: String,
+        #[arg(long)]
+        query: Option<String>,
+        #[arg(long)]
+        all: bool,
+    },
+    /// Read one element's text by ref.
+    ReadText { pane_id: String, r#ref: String },
+    /// Click an element. Exactly one of --ref / --selector / --text.
+    Click {
+        pane_id: String,
+        #[arg(long)]
+        r#ref: Option<String>,
+        #[arg(long)]
+        selector: Option<String>,
+        #[arg(long)]
+        text: Option<String>,
+    },
+    /// Fill an input/textarea/contenteditable. Exactly one of --ref / --selector.
+    Fill {
+        pane_id: String,
+        text: String,
+        #[arg(long)]
+        r#ref: Option<String>,
+        #[arg(long)]
+        selector: Option<String>,
+        #[arg(long)]
+        replace: bool,
+    },
+    /// Pick an option in a <select>.
+    Select {
+        pane_id: String,
+        value: String,
+        #[arg(long)]
+        r#ref: Option<String>,
+        #[arg(long)]
+        selector: Option<String>,
+    },
+    /// Dispatch a key combo.
+    PressKey {
+        pane_id: String,
+        combo: String,
+        #[arg(long)]
+        r#ref: Option<String>,
+        #[arg(long)]
+        selector: Option<String>,
+    },
+    /// Wait until a predicate is satisfied. Kinds: url / text / gone-text /
+    /// selector / gone-selector / ref / idle. `idle` ignores `value`.
+    WaitFor {
+        pane_id: String,
+        kind: String,
+        #[arg(default_value = "")]
+        value: String,
+        #[arg(long)]
+        timeout_ms: Option<u64>,
+    },
+    /// Evaluate a JS expression in the pane and return its result.
+    Eval { pane_id: String, script: String },
+    /// Pause: snapshot/interaction calls return 409 until resumed.
+    Pause { pane_id: String },
+    /// Resume a paused pane.
+    Resume { pane_id: String },
+    /// Named-session management.
+    Session {
+        #[command(subcommand)]
+        action: BrowserSessionAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum BrowserSessionAction {
+    /// Create a named session (cookie/storage jar).
+    Create {
+        name: String,
+        #[arg(long)]
+        partition: Option<String>,
+    },
+    /// List named sessions for the active pkg.
+    List,
+    /// Delete a named session (cookie data on disk is preserved).
+    Delete { name: String },
 }
 
 #[derive(Copy, Clone, ValueEnum)]
@@ -567,8 +702,223 @@ fn run() -> Result<()> {
             )?;
             print_write_result(&format!("iframe-send {pane} {kind}"), &v, fmt);
         }
+        Command::Browser { pkg_id, action } => {
+            run_browser(&client, &pkg_id, action, fmt)?;
+        }
     }
 
+    Ok(())
+}
+
+fn parse_rect(s: &str) -> Result<serde_json::Value> {
+    let (w, h) = s
+        .split_once('x')
+        .ok_or_else(|| anyhow!("rect must be <W>x<H> (got {s:?})"))?;
+    let w: u32 = w.parse().map_err(|_| anyhow!("rect width not an integer: {s:?}"))?;
+    let h: u32 = h.parse().map_err(|_| anyhow!("rect height not an integer: {s:?}"))?;
+    Ok(json!({ "x": 0, "y": 0, "w": w, "h": h }))
+}
+
+fn run_browser(
+    client: &Client,
+    pkg_id: &str,
+    action: BrowserAction,
+    fmt: Format,
+) -> Result<()> {
+    match action {
+        BrowserAction::Open { pane_id, url, session, partition, rect } => {
+            if session.is_some() && partition.is_some() {
+                return Err(anyhow!("pass at most one of --session / --partition"));
+            }
+            let resolved_partition: Option<String> = if let Some(name) = &session {
+                let v = client.post(
+                    "/iyke/browser/session/resolve",
+                    json!({ "pkg_id": pkg_id, "name": name }),
+                )?;
+                Some(v.get("partition").and_then(|p| p.as_str()).ok_or_else(|| anyhow!("session resolve returned no partition"))?.to_string())
+            } else {
+                partition
+            };
+            let body = json!({
+                "pkg_id": pkg_id,
+                "pane_id": pane_id,
+                "url": url,
+                "partition": resolved_partition,
+                "rect": parse_rect(&rect)?,
+            });
+            let v = client.post("/iyke/browser/open", body)?;
+            print_write_result(&format!("browser open {pane_id} {url}"), &v, fmt);
+        }
+        BrowserAction::Close { pane_id } => {
+            let v = client.post(
+                "/iyke/browser/close",
+                json!({ "pkg_id": pkg_id, "pane_id": pane_id }),
+            )?;
+            print_write_result(&format!("browser close {pane_id}"), &v, fmt);
+        }
+        BrowserAction::List => {
+            let v = client.get_with_query(
+                "/iyke/browser/list",
+                &[("pkg_id", pkg_id.to_string())],
+            )?;
+            print_write_result("browser list", &v, fmt);
+        }
+        BrowserAction::Focus { pane_id } => {
+            let v = client.post(
+                "/iyke/browser/focus",
+                json!({ "pkg_id": pkg_id, "pane_id": pane_id }),
+            )?;
+            print_write_result(&format!("browser focus {pane_id}"), &v, fmt);
+        }
+        BrowserAction::Goto { pane_id, url } => {
+            let v = client.post(
+                "/iyke/browser/goto",
+                json!({ "pkg_id": pkg_id, "pane_id": pane_id, "url": url }),
+            )?;
+            print_write_result(&format!("browser goto {pane_id} {url}"), &v, fmt);
+        }
+        BrowserAction::Back { pane_id } => {
+            let v = client.post(
+                "/iyke/browser/back",
+                json!({ "pkg_id": pkg_id, "pane_id": pane_id }),
+            )?;
+            print_write_result(&format!("browser back {pane_id}"), &v, fmt);
+        }
+        BrowserAction::Forward { pane_id } => {
+            let v = client.post(
+                "/iyke/browser/forward",
+                json!({ "pkg_id": pkg_id, "pane_id": pane_id }),
+            )?;
+            print_write_result(&format!("browser forward {pane_id}"), &v, fmt);
+        }
+        BrowserAction::Reload { pane_id } => {
+            let v = client.post(
+                "/iyke/browser/reload",
+                json!({ "pkg_id": pkg_id, "pane_id": pane_id }),
+            )?;
+            print_write_result(&format!("browser reload {pane_id}"), &v, fmt);
+        }
+        BrowserAction::Snapshot { pane_id, query, all } => {
+            let v = client.post(
+                "/iyke/browser/snapshot",
+                json!({ "pkg_id": pkg_id, "pane_id": pane_id, "query": query, "all": all }),
+            )?;
+            print_write_result(&format!("browser snapshot {pane_id}"), &v, fmt);
+        }
+        BrowserAction::ReadText { pane_id, r#ref } => {
+            let v = client.post(
+                "/iyke/browser/read-text",
+                json!({ "pkg_id": pkg_id, "pane_id": pane_id, "ref": r#ref }),
+            )?;
+            print_write_result(&format!("browser read-text {pane_id} {ref_}", ref_ = r#ref), &v, fmt);
+        }
+        BrowserAction::Click { pane_id, r#ref, selector, text } => {
+            require_one(&r#ref, &selector, &text)?;
+            let v = client.post(
+                "/iyke/browser/click",
+                json!({
+                    "pkg_id": pkg_id, "pane_id": pane_id,
+                    "ref": r#ref, "selector": selector, "text": text,
+                }),
+            )?;
+            print_write_result(&format!("browser click {pane_id}"), &v, fmt);
+        }
+        BrowserAction::Fill { pane_id, text, r#ref, selector, replace } => {
+            require_one(&r#ref, &selector, &None)?;
+            let v = client.post(
+                "/iyke/browser/fill",
+                json!({
+                    "pkg_id": pkg_id, "pane_id": pane_id, "text": text,
+                    "ref": r#ref, "selector": selector, "replace": replace,
+                }),
+            )?;
+            print_write_result(&format!("browser fill {pane_id}"), &v, fmt);
+        }
+        BrowserAction::Select { pane_id, value, r#ref, selector } => {
+            require_one(&r#ref, &selector, &None)?;
+            let v = client.post(
+                "/iyke/browser/select",
+                json!({
+                    "pkg_id": pkg_id, "pane_id": pane_id, "value": value,
+                    "ref": r#ref, "selector": selector,
+                }),
+            )?;
+            print_write_result(&format!("browser select {pane_id} {value}"), &v, fmt);
+        }
+        BrowserAction::PressKey { pane_id, combo, r#ref, selector } => {
+            let v = client.post(
+                "/iyke/browser/press-key",
+                json!({
+                    "pkg_id": pkg_id, "pane_id": pane_id, "combo": combo,
+                    "ref": r#ref, "selector": selector,
+                }),
+            )?;
+            print_write_result(&format!("browser press-key {pane_id} {combo}"), &v, fmt);
+        }
+        BrowserAction::WaitFor { pane_id, kind, value, timeout_ms } => {
+            let value_field: serde_json::Value = if value.is_empty() {
+                serde_json::Value::Null
+            } else {
+                json!(value)
+            };
+            let v = client.post(
+                "/iyke/browser/wait-for",
+                json!({
+                    "pkg_id": pkg_id, "pane_id": pane_id, "kind": kind,
+                    "value": value_field, "timeout_ms": timeout_ms,
+                }),
+            )?;
+            let satisfied = v.get("satisfied").and_then(|s| s.as_bool()).unwrap_or(false);
+            print_write_result(&format!("browser wait-for {pane_id} {kind}={value}"), &v, fmt);
+            if !satisfied {
+                std::process::exit(2);
+            }
+        }
+        BrowserAction::Eval { pane_id, script } => {
+            let v = client.post(
+                "/iyke/browser/eval",
+                json!({ "pkg_id": pkg_id, "pane_id": pane_id, "script": script }),
+            )?;
+            print_write_result(&format!("browser eval {pane_id}"), &v, fmt);
+        }
+        BrowserAction::Pause { pane_id } => {
+            let v = client.post(
+                "/iyke/browser/pause",
+                json!({ "pkg_id": pkg_id, "pane_id": pane_id }),
+            )?;
+            print_write_result(&format!("browser pause {pane_id}"), &v, fmt);
+        }
+        BrowserAction::Resume { pane_id } => {
+            let v = client.post(
+                "/iyke/browser/resume",
+                json!({ "pkg_id": pkg_id, "pane_id": pane_id }),
+            )?;
+            print_write_result(&format!("browser resume {pane_id}"), &v, fmt);
+        }
+        BrowserAction::Session { action } => match action {
+            BrowserSessionAction::Create { name, partition } => {
+                let v = client.post(
+                    "/iyke/browser/session/create",
+                    json!({ "pkg_id": pkg_id, "name": name, "partition": partition }),
+                )?;
+                print_write_result(&format!("browser session create {name}"), &v, fmt);
+            }
+            BrowserSessionAction::List => {
+                let v = client.get_with_query(
+                    "/iyke/browser/session/list",
+                    &[("pkg_id", pkg_id.to_string())],
+                )?;
+                print_write_result("browser session list", &v, fmt);
+            }
+            BrowserSessionAction::Delete { name } => {
+                let v = client.post(
+                    "/iyke/browser/session/delete",
+                    json!({ "pkg_id": pkg_id, "name": name }),
+                )?;
+                print_write_result(&format!("browser session delete {name}"), &v, fmt);
+            }
+        },
+    }
     Ok(())
 }
 

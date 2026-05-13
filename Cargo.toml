@@ -19,3 +19,6 @@ dirs = "5"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+# Standalone crate — not part of the parent royalti-co cargo workspace.
+[workspace]
