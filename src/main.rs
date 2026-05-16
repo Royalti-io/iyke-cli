@@ -387,6 +387,10 @@ enum OpenKind {
     Chat { session_id: String },
     /// Open a file artifact viewer.
     Artifact { path: String },
+    /// Open a folder as a Lightroom-style artifact-grid pane (one cell per
+    /// `.html` file with iframe thumbnails + pin overlay).
+    #[command(name = "artifact-grid")]
+    ArtifactGrid { path: String },
     /// Open a mini-app by name (storyboard, video-engine, canvas-design, image-generator).
     MiniApp { name: String },
 }
@@ -515,6 +519,10 @@ fn run() -> Result<()> {
                 OpenKind::Artifact { path } => (
                     format!("open artifact {path}"),
                     json!({ "kind": "artifact", "path": path }),
+                ),
+                OpenKind::ArtifactGrid { path } => (
+                    format!("open artifact-grid {path}"),
+                    json!({ "kind": "artifact-grid", "path": path }),
                 ),
                 OpenKind::MiniApp { name } => (
                     format!("open mini-app {name}"),
