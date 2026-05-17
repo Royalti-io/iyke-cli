@@ -201,6 +201,46 @@ enum Command {
         pane: Option<String>,
     },
 
+    /// Read captured PTY output for a terminal pane. xterm.js renders to a
+    /// canvas that screenshots can't reliably capture on WebKitGTK; this
+    /// command reads from a ring buffer the shell tees off each PTY's data
+    /// stream. ANSI/VT escapes are stripped by default for readability.
+    #[command(name = "terminal-read")]
+    TerminalRead {
+        /// Leaf id of the terminal pane. Defaults to the focused pane.
+        #[arg(long)]
+        pane: Option<String>,
+        /// Tail size in bytes. Default returns the entire buffer (per-session
+        /// cap is 256 KiB).
+        #[arg(long)]
+        bytes: Option<usize>,
+        /// Return raw bytes (including ANSI/VT escapes). Default strips them.
+        #[arg(long)]
+        raw: bool,
+    },
+
+    /// Write to a terminal pane's PTY. Provide `text` (raw bytes — backslash
+    /// escapes like `\n`, `\t`, `\r`, `\x1b`, `\\` are interpreted), one or
+    /// more `--key` chords (translated to terminal escapes — `Enter` → `\r`,
+    /// `Ctrl+C` → `\x03`, `Up`/`Down`/`Left`/`Right` → CSI arrows, `F1`-`F12`
+    /// → SS3/CSI), or both (text first, then keys in order).
+    ///
+    /// Examples:
+    ///   iyke terminal-send "cd ikenga" --key Enter
+    ///   iyke terminal-send --pane <leafId> --key Ctrl+C
+    ///   iyke terminal-send "echo hi" --key Enter --key Up
+    #[command(name = "terminal-send")]
+    TerminalSend {
+        /// Raw text to write (optional if at least one `--key` is given).
+        text: Option<String>,
+        /// Key combo to append after `text`. Repeatable.
+        #[arg(long = "key")]
+        keys: Vec<String>,
+        /// Leaf id of the terminal pane. Defaults to the focused pane.
+        #[arg(long)]
+        pane: Option<String>,
+    },
+
     /// Dump the TanStack Query cache: keys, statuses, last update times.
     QueryCache {
         #[arg(long)]
@@ -685,6 +725,55 @@ fn run() -> Result<()> {
             let v = client.post("/iyke/key", body)?;
             print_write_result(&format!("key {combo}"), &v, fmt);
         }
+        Command::TerminalRead { pane, bytes, raw } => {
+            let mut q: Vec<(&str, String)> = Vec::new();
+            if let Some(p) = &pane {
+                q.push(("pane", p.clone()));
+            }
+            if let Some(b) = bytes {
+                q.push(("bytes", b.to_string()));
+            }
+            if raw {
+                q.push(("raw", "true".into()));
+            }
+            let v = client.get_with_query("/iyke/terminal/read", &q)?;
+            match fmt {
+                Format::Json => println!("{}", serde_json::to_string_pretty(&v).unwrap_or_default()),
+                Format::Human => {
+                    if let Some(err) = v.get("error").and_then(|e| e.as_str()) {
+                        eprintln!("terminal-read: {err}");
+                        std::process::exit(1);
+                    }
+                    if let Some(text) = v.get("text").and_then(|t| t.as_str()) {
+                        print!("{text}");
+                        if !text.ends_with('\n') {
+                            println!();
+                        }
+                    }
+                }
+            }
+        }
+        Command::TerminalSend { text, keys, pane } => {
+            if text.is_none() && keys.is_empty() {
+                return Err(anyhow!(
+                    "terminal-send: must provide text and/or at least one --key"
+                ));
+            }
+            let data = text.as_deref().map(interpret_backslash_escapes);
+            let body = json!({
+                "pane": pane,
+                "data": data,
+                "keys": keys,
+            });
+            let v = client.post("/iyke/terminal/send", body)?;
+            let summary = match (&data, keys.is_empty()) {
+                (Some(d), false) => format!("terminal-send text({}b) + {} key(s)", d.len(), keys.len()),
+                (Some(d), true) => format!("terminal-send text({}b)", d.len()),
+                (None, false) => format!("terminal-send {} key(s)", keys.len()),
+                (None, true) => "terminal-send".into(),
+            };
+            print_write_result(&summary, &v, fmt);
+        }
         Command::QueryCache { pane } => {
             let mut q = Vec::new();
             if let Some(p) = &pane {
@@ -716,6 +805,65 @@ fn run() -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Interpret a handful of common backslash escapes in CLI input so users
+/// don't have to figure out their shell's quoting rules to send a newline.
+/// Unknown escapes pass through as the literal backslash + char.
+fn interpret_backslash_escapes(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        let Some(&next) = chars.peek() else {
+            out.push('\\');
+            break;
+        };
+        chars.next();
+        match next {
+            'n' => out.push('\n'),
+            'r' => out.push('\r'),
+            't' => out.push('\t'),
+            '0' => out.push('\0'),
+            '\\' => out.push('\\'),
+            '"' => out.push('"'),
+            '\'' => out.push('\''),
+            'e' => out.push('\x1b'),
+            'x' => {
+                let h1 = chars.next();
+                let h2 = chars.next();
+                match (h1, h2) {
+                    (Some(a), Some(b)) => {
+                        let hex: String = [a, b].iter().collect();
+                        match u8::from_str_radix(&hex, 16) {
+                            Ok(byte) => out.push(byte as char),
+                            Err(_) => {
+                                out.push('\\');
+                                out.push('x');
+                                out.push(a);
+                                out.push(b);
+                            }
+                        }
+                    }
+                    _ => {
+                        out.push('\\');
+                        out.push('x');
+                        if let Some(a) = h1 {
+                            out.push(a);
+                        }
+                    }
+                }
+            }
+            other => {
+                out.push('\\');
+                out.push(other);
+            }
+        }
+    }
+    out
 }
 
 fn parse_rect(s: &str) -> Result<serde_json::Value> {
