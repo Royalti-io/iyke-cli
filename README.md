@@ -1,6 +1,21 @@
 # iyke
 
-CLI for the Ikenga desktop app's localhost control bridge. The desktop app exposes an HTTP server bound to `127.0.0.1:<random-port>` with a per-launch bearer token; this CLI reads the control file the app writes and forwards subcommands as authenticated HTTP calls. Use it to navigate panes, switch sidebar modes, open tabs, and inspect state from a terminal or script.
+[![Version](https://img.shields.io/badge/version-v0.0.0-blue.svg)](https://github.com/Royalti-io/iyke-cli/releases)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+
+> `iyke` — the runtime controller for a running Ikenga shell. Drive panes, modes, tabs, and
+> read live state from your terminal.
+
+## What it is
+
+`iyke` talks to a *running* Ikenga desktop app over its localhost control bridge. The app
+binds an HTTP server to `127.0.0.1:<random-port>` with a per-launch bearer token; `iyke`
+reads the control file the app writes and forwards subcommands as authenticated calls. Use
+it to navigate, switch modes, open tabs, and inspect UI state from a script.
+
+It's one of two Ikenga CLIs — the **runtime** one. (The other,
+[`ikenga`](https://github.com/Royalti-io/ikenga-cli), manages packages on disk. They share
+no code.)
 
 ## Install
 
@@ -30,6 +45,14 @@ iyke focus index 2                   # focus the 2nd leaf pane (matches ⌃2)
 iyke close                           # close the focused pane
 ```
 
-Add `--json` to any command for machine-readable output.
+Add `--json` to any command for machine-readable output. If the desktop app is not running,
+every command exits non-zero with a clear message instead of hanging.
 
-If the desktop app is not running, every command exits non-zero with a clear message instead of hanging.
+## Links
+
+- [`ikenga-cli`](https://github.com/Royalti-io/ikenga-cli) — the package manager (the *other* CLI)
+- [`ikenga`](https://github.com/Royalti-io/ikenga) — the desktop shell it controls
+
+## License
+
+Apache-2.0 — see [`LICENSE`](LICENSE).
