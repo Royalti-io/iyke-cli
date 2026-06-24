@@ -304,8 +304,13 @@ enum BrowserAction {
         #[arg(long)]
         partition: Option<String>,
         /// `<W>x<H>` for size; defaults to 1024x768. Position defaults to (0,0).
+        /// Ignored for `--engine chrome` (own OS window).
         #[arg(long, default_value = "1024x768")]
         rect: String,
+        /// Engine backing the pane: `webkit` (default, in-shell child webview)
+        /// or `chrome` (Managed mode — installed Chrome over CDP, own window).
+        #[arg(value_enum, long, default_value = "webkit")]
+        engine: Engine,
     },
     /// Close a pane.
     Close { pane_id: String },
@@ -454,6 +459,25 @@ impl SplitDirection {
         match self {
             Self::Horizontal => "horizontal",
             Self::Vertical => "vertical",
+        }
+    }
+}
+
+/// Browser engine backing a pane (WP-07 routing). `webkit` is the in-shell
+/// child webview; `chrome` is Managed mode — the shell drives the user's
+/// installed Chrome over CDP in its own OS window. Decided at `open`; the
+/// shell remembers it per pane, so later verbs don't repeat it.
+#[derive(Copy, Clone, ValueEnum)]
+enum Engine {
+    Webkit,
+    Chrome,
+}
+
+impl Engine {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Webkit => "webkit",
+            Self::Chrome => "chrome",
         }
     }
 }
@@ -882,7 +906,7 @@ fn run_browser(
     fmt: Format,
 ) -> Result<()> {
     match action {
-        BrowserAction::Open { pane_id, url, session, partition, rect } => {
+        BrowserAction::Open { pane_id, url, session, partition, rect, engine } => {
             if session.is_some() && partition.is_some() {
                 return Err(anyhow!("pass at most one of --session / --partition"));
             }
@@ -901,6 +925,7 @@ fn run_browser(
                 "url": url,
                 "partition": resolved_partition,
                 "rect": parse_rect(&rect)?,
+                "engine": engine.as_str(),
             });
             let v = client.post("/iyke/browser/open", body)?;
             print_write_result(&format!("browser open {pane_id} {url}"), &v, fmt);
@@ -1090,4 +1115,16 @@ fn require_one(
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn engine_as_str_matches_wire_strings() {
+        // The wire strings the shell's engine router (WP-07) matches on.
+        assert_eq!(Engine::Webkit.as_str(), "webkit");
+        assert_eq!(Engine::Chrome.as_str(), "chrome");
+    }
 }
