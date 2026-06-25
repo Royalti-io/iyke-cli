@@ -296,6 +296,12 @@ enum BrowserAction {
     /// commands. Use `--session <name>` to bind to a named cookie jar
     /// (`iyke browser session create` first), or `--partition <slug>`
     /// for a raw jar.
+    ///
+    /// For `--engine chrome` in attach mode, `--attach-target` controls
+    /// what the engine drives:
+    ///   `new`    — open a fresh tab (default; does not disturb open tabs)
+    ///   `active` — adopt the first open tab (today's behavior; navigates if --url given)
+    ///   `<id>`   — adopt a specific tab by CDP target id or URL substring
     Open {
         pane_id: String,
         url: String,
@@ -311,6 +317,17 @@ enum BrowserAction {
         /// or `chrome` (Managed mode — installed Chrome over CDP, own window).
         #[arg(value_enum, long, default_value = "webkit")]
         engine: Engine,
+        /// Playwright mode for `--engine chrome`: `managed` (default — dedicated
+        /// profile, own window) or `attach` (drive a running debug Chrome).
+        /// `--attach-target` only takes effect in `attach` mode.
+        #[arg(long, default_value = "managed")]
+        mode: String,
+        /// For `--engine chrome` attach mode: which tab to drive.
+        /// `new` (default) opens a fresh tab without touching open tabs.
+        /// `active` adopts the first open tab (navigates only if url given).
+        /// Any other value is treated as a CDP target id or URL substring to match.
+        #[arg(long, default_value = "new")]
+        attach_target: String,
     },
     /// Close a pane.
     Close { pane_id: String },
@@ -395,6 +412,32 @@ enum BrowserAction {
     Session {
         #[command(subcommand)]
         action: BrowserSessionAction,
+    },
+
+    /// List on-disk Chrome profiles (dir, display name, running status).
+    /// OS Chrome profiles only — not Ikenga named sessions/partitions.
+    /// Data dir: ~/.config/google-chrome (Linux),
+    ///            ~/Library/Application Support/Google/Chrome (macOS),
+    ///            %LOCALAPPDATA%/Google/Chrome/User Data (Windows).
+    #[command(name = "chrome-profiles")]
+    ChromeProfiles,
+
+    /// List open targets (tabs/windows) on the running debug Chrome endpoint.
+    /// Requires Chrome to be started with `--remote-debugging-port`.
+    /// Prints a hint if no CDP endpoint is reachable.
+    #[command(name = "chrome-targets")]
+    ChromeTargets,
+
+    /// Launch an on-disk Chrome profile in debug mode so it can be attached to.
+    /// Errors if that profile is already running (singleton lock present).
+    #[command(name = "chrome-launch-profile")]
+    ChromeLaunchProfile {
+        /// Profile directory name (e.g. `Default`, `Profile 3`).
+        /// Use `iyke browser chrome-profiles` to list names.
+        dir: String,
+        /// CDP debug port to bind. Default: 9222.
+        #[arg(long, default_value = "9222")]
+        port: u16,
     },
 }
 
@@ -906,7 +949,84 @@ fn run_browser(
     fmt: Format,
 ) -> Result<()> {
     match action {
-        BrowserAction::Open { pane_id, url, session, partition, rect, engine } => {
+        BrowserAction::ChromeProfiles => {
+            let v = client.get_with_query("/iyke/browser/profiles", &[])?;
+            match fmt {
+                Format::Json => println!("{}", serde_json::to_string_pretty(&v).unwrap_or_default()),
+                Format::Human => {
+                    if let Some(err) = v.get("error").and_then(|e| e.as_str()) {
+                        eprintln!("browser profiles: {err}");
+                        std::process::exit(1);
+                    }
+                    let profiles = v.get("profiles").and_then(|p| p.as_array()).map(|a| a.as_slice()).unwrap_or(&[]);
+                    if profiles.is_empty() {
+                        println!("No Chrome profiles found.");
+                    } else {
+                        println!("{:<20} {:<30} {}", "DIR", "NAME", "RUNNING");
+                        println!("{}", "-".repeat(60));
+                        for p in profiles {
+                            let dir = p.get("dir").and_then(|d| d.as_str()).unwrap_or("-");
+                            let name = p.get("name").and_then(|n| n.as_str()).unwrap_or("-");
+                            let running = p.get("running").and_then(|r| r.as_bool()).unwrap_or(false);
+                            println!("{:<20} {:<30} {}", dir, name, if running { "yes" } else { "no" });
+                        }
+                    }
+                }
+            }
+        }
+        BrowserAction::ChromeTargets => {
+            let v = client.get_with_query("/iyke/browser/targets", &[])?;
+            match fmt {
+                Format::Json => println!("{}", serde_json::to_string_pretty(&v).unwrap_or_default()),
+                Format::Human => {
+                    if let Some(err) = v.get("error").and_then(|e| e.as_str()) {
+                        eprintln!("browser targets: {err}");
+                        std::process::exit(1);
+                    }
+                    let endpoint = v.get("endpoint").and_then(|e| e.as_str());
+                    if endpoint.is_none() {
+                        println!("No CDP endpoint reachable.");
+                        println!("Start Chrome with:  --remote-debugging-port=9222 --remote-allow-origins=http://127.0.0.1:9222");
+                        println!("Or use: iyke browser chrome-launch-profile <dir>");
+                        return Ok(());
+                    }
+                    println!("Endpoint: {}", endpoint.unwrap_or("-"));
+                    let targets = v.get("targets").and_then(|t| t.as_array()).map(|a| a.as_slice()).unwrap_or(&[]);
+                    if targets.is_empty() {
+                        println!("No open tabs/windows.");
+                    } else {
+                        println!("{:<40} {:<10} {}", "TARGET ID", "KIND", "TITLE / URL");
+                        println!("{}", "-".repeat(90));
+                        for t in targets {
+                            let id = t.get("targetId").and_then(|i| i.as_str()).unwrap_or("-");
+                            let kind = t.get("kind").and_then(|k| k.as_str()).unwrap_or("-");
+                            let title = t.get("title").and_then(|t| t.as_str()).unwrap_or("");
+                            let url = t.get("url").and_then(|u| u.as_str()).unwrap_or("-");
+                            let label = if title.is_empty() { url.to_string() } else { format!("{title}  ({url})") };
+                            println!("{:<40} {:<10} {}", id, kind, label);
+                        }
+                    }
+                }
+            }
+        }
+        BrowserAction::ChromeLaunchProfile { dir, port } => {
+            let v = client.post(
+                "/iyke/browser/launch_profile",
+                json!({ "dir": dir, "port": port }),
+            )?;
+            match fmt {
+                Format::Json => println!("{}", serde_json::to_string_pretty(&v).unwrap_or_default()),
+                Format::Human => {
+                    if let Some(err) = v.get("error").and_then(|e| e.as_str()) {
+                        eprintln!("browser launch-profile: {err}");
+                        std::process::exit(1);
+                    }
+                    let endpoint = v.get("endpoint").and_then(|e| e.as_str()).unwrap_or("unknown");
+                    println!("Launched Chrome profile '{dir}' — CDP endpoint: {endpoint}");
+                }
+            }
+        }
+        BrowserAction::Open { pane_id, url, session, partition, rect, engine, mode, attach_target } => {
             if session.is_some() && partition.is_some() {
                 return Err(anyhow!("pass at most one of --session / --partition"));
             }
@@ -926,6 +1046,8 @@ fn run_browser(
                 "partition": resolved_partition,
                 "rect": parse_rect(&rect)?,
                 "engine": engine.as_str(),
+                "mode": mode,
+                "attach_target": attach_target,
             });
             let v = client.post("/iyke/browser/open", body)?;
             print_write_result(&format!("browser open {pane_id} {url}"), &v, fmt);
