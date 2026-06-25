@@ -317,6 +317,11 @@ enum BrowserAction {
         /// or `chrome` (Managed mode — installed Chrome over CDP, own window).
         #[arg(value_enum, long, default_value = "webkit")]
         engine: Engine,
+        /// Playwright mode for `--engine chrome`: `managed` (default — dedicated
+        /// profile, own window) or `attach` (drive a running debug Chrome).
+        /// `--attach-target` only takes effect in `attach` mode.
+        #[arg(long, default_value = "managed")]
+        mode: String,
         /// For `--engine chrome` attach mode: which tab to drive.
         /// `new` (default) opens a fresh tab without touching open tabs.
         /// `active` adopts the first open tab (navigates only if url given).
@@ -1021,7 +1026,7 @@ fn run_browser(
                 }
             }
         }
-        BrowserAction::Open { pane_id, url, session, partition, rect, engine, attach_target } => {
+        BrowserAction::Open { pane_id, url, session, partition, rect, engine, mode, attach_target } => {
             if session.is_some() && partition.is_some() {
                 return Err(anyhow!("pass at most one of --session / --partition"));
             }
@@ -1041,6 +1046,7 @@ fn run_browser(
                 "partition": resolved_partition,
                 "rect": parse_rect(&rect)?,
                 "engine": engine.as_str(),
+                "mode": mode,
                 "attach_target": attach_target,
             });
             let v = client.post("/iyke/browser/open", body)?;
