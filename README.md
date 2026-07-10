@@ -38,7 +38,7 @@ iyke mode files                      # switch the sidebar to the files mode
 
 iyke open route /agents              # open a new tab in the focused pane
 iyke open terminal --cmd "bun run dev"
-iyke open mini-app storyboard
+iyke open mini-app video-engine
 
 iyke split horizontal                # split the focused pane side-by-side
 iyke focus index 2                   # focus the 2nd leaf pane (matches ⌃2)

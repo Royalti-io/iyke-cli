@@ -52,7 +52,7 @@ enum Command {
 
     /// Switch the sidebar activity mode.
     Mode {
-        /// One of: app, files, agents, sessions, settings, storyboard,
+        /// One of: app, files, agents, sessions, settings,
         /// video-engine, canvas-design, image-generator.
         mode: String,
     },
@@ -250,8 +250,8 @@ enum Command {
     /// Open Chrome DevTools (debug builds only).
     Devtools,
 
-    /// Read the latest published state object for an iframe pane (storyboard
-    /// cursor, comp current frame, etc.). Iframes publish via the bridge's
+    /// Read the latest published state object for an iframe pane (comp
+    /// current frame, etc.). Iframes publish via the bridge's
     /// `publishState(key, value)` API.
     IframeState {
         /// Pane id (from `iyke state` shell.panes.leaves[].id).
@@ -479,7 +479,7 @@ enum OpenKind {
     /// `.html` file with iframe thumbnails + pin overlay).
     #[command(name = "artifact-grid")]
     ArtifactGrid { path: String },
-    /// Open a mini-app by name (storyboard, video-engine, canvas-design, image-generator).
+    /// Open a mini-app by name (video-engine, canvas-design, image-generator).
     MiniApp { name: String },
 }
 
