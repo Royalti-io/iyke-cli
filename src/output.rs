@@ -96,14 +96,124 @@ fn print_panes(panes: Option<&Value>) {
             .unwrap_or_else(|| "(empty)".into());
         let marker = if focused { "*" } else { " " };
         let short_id: String = id.chars().take(8).collect();
-        println!(
-            "    {marker} {short_id}  [{active}/{tab_count}] {active_label}"
-        );
+        println!("    {marker} {short_id}  [{active}/{tab_count}] {active_label}");
     }
 }
 
 /// For all the write commands. JSON mode prints the raw response;
 /// human mode prints a one-liner confirming what happened.
+pub fn print_terminals(value: &Value, fmt: Format) {
+    match fmt {
+        Format::Json => println!("{}", value),
+        Format::Human => {
+            let Some(terminals) = value.as_array() else {
+                println!("(no terminals)");
+                return;
+            };
+            if terminals.is_empty() {
+                println!("(no terminals)");
+                return;
+            }
+            println!(
+                "{:<10} {:<10} {:<9} {:<18} {}",
+                "TERMINAL", "PTY", "STATUS", "LABEL", "COMMAND"
+            );
+            for terminal in terminals {
+                let terminal_id = terminal
+                    .get("terminal_id")
+                    .and_then(Value::as_str)
+                    .unwrap_or("?");
+                let pty_id = terminal
+                    .get("pty_id")
+                    .and_then(Value::as_str)
+                    .unwrap_or("?");
+                let status = terminal
+                    .get("status")
+                    .and_then(Value::as_str)
+                    .unwrap_or("?");
+                let label = terminal.get("label").and_then(Value::as_str).unwrap_or("-");
+                let argv = terminal
+                    .get("argv")
+                    .and_then(Value::as_array)
+                    .map(|args| {
+                        args.iter()
+                            .filter_map(Value::as_str)
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                    })
+                    .unwrap_or_default();
+                println!(
+                    "{:<10} {:<10} {:<9} {:<18} {}",
+                    terminal_id.chars().take(8).collect::<String>(),
+                    pty_id.chars().take(8).collect::<String>(),
+                    status,
+                    label,
+                    argv
+                );
+            }
+        }
+    }
+}
+
+pub fn print_windows(value: &Value, fmt: Format) {
+    match fmt {
+        Format::Json => println!("{}", value),
+        Format::Human => {
+            let Some(windows) = value.as_array() else {
+                println!("(no windows)");
+                return;
+            };
+            for window in windows {
+                let label = window.get("label").and_then(Value::as_str).unwrap_or("?");
+                let kind = window.get("kind").and_then(Value::as_str).unwrap_or("?");
+                let surfaces = window
+                    .get("surface_set")
+                    .and_then(Value::as_array)
+                    .map(|values| {
+                        values
+                            .iter()
+                            .filter_map(Value::as_str)
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    })
+                    .unwrap_or_default();
+                println!("{label:<28} {kind:<16} {surfaces}");
+            }
+        }
+    }
+}
+
+pub fn print_terminal_wait(value: &Value, fmt: Format) -> bool {
+    let satisfied = value
+        .get("satisfied")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    match fmt {
+        Format::Json => println!("{}", value),
+        Format::Human => {
+            if let Some(text) = value.get("text").and_then(Value::as_str) {
+                if !text.is_empty() {
+                    print!("{text}");
+                    if !text.ends_with('\n') {
+                        println!();
+                    }
+                }
+            }
+            if satisfied {
+                eprintln!(
+                    "# terminal wait satisfied at offset {}",
+                    value.get("end_offset").and_then(Value::as_u64).unwrap_or(0)
+                );
+            } else if value.get("exited").and_then(Value::as_bool) == Some(true) {
+                eprintln!("# terminal exited before the condition was satisfied");
+            } else {
+                eprintln!("# terminal wait timed out");
+            }
+        }
+    }
+    satisfied
+}
+
 pub fn print_write_result(label: &str, value: &Value, fmt: Format) {
     match fmt {
         Format::Json => println!("{}", value),
@@ -172,7 +282,10 @@ pub fn print_network(value: &Value, fmt: Format) {
                 println!("(no network activity)");
                 return;
             }
-            println!("{:>13}  {:<6} {:>4} {:>6}  {}", "ts", "method", "stat", "ms", "url");
+            println!(
+                "{:>13}  {:<6} {:>4} {:>6}  {}",
+                "ts", "method", "stat", "ms", "url"
+            );
             for e in entries {
                 let ts = e.get("ts").and_then(|v| v.as_u64()).unwrap_or(0);
                 let method = e.get("method").and_then(|v| v.as_str()).unwrap_or("?");
@@ -184,9 +297,7 @@ pub fn print_network(value: &Value, fmt: Format) {
                     .unwrap_or_else(|| "-".into());
                 let dur = e.get("duration_ms").and_then(|v| v.as_u64()).unwrap_or(0);
                 let err = e.get("error").and_then(|v| v.as_str());
-                let suffix = err
-                    .map(|s| format!("  [error: {s}]"))
-                    .unwrap_or_default();
+                let suffix = err.map(|s| format!("  [error: {s}]")).unwrap_or_default();
                 println!("{ts:>13}  {method:<6} {status:>4} {dur:>6}  {url}{suffix}");
             }
         }
@@ -212,7 +323,10 @@ pub fn print_wait(value: &Value, fmt: Format) -> bool {
         .get("satisfied")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
-    let elapsed = value.get("elapsed_ms").and_then(|v| v.as_u64()).unwrap_or(0);
+    let elapsed = value
+        .get("elapsed_ms")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
     let msg = value.get("message").and_then(|v| v.as_str());
     match fmt {
         Format::Json => println!("{}", value),
@@ -269,19 +383,11 @@ pub fn print_query_cache(value: &Value, fmt: Format) {
                 let status = e.get("status").and_then(|v| v.as_str()).unwrap_or("?");
                 let fetch = e.get("fetchStatus").and_then(|v| v.as_str()).unwrap_or("?");
                 let stale = e.get("isStale").and_then(|v| v.as_bool()).unwrap_or(false);
-                let upd = e
-                    .get("dataUpdatedAt")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(0);
-                let preview = e
-                    .get("dataPreview")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
+                let upd = e.get("dataUpdatedAt").and_then(|v| v.as_u64()).unwrap_or(0);
+                let preview = e.get("dataPreview").and_then(|v| v.as_str()).unwrap_or("");
                 let err = e.get("error").and_then(|v| v.as_str());
                 let stale_marker = if stale { "*stale*" } else { "fresh" };
-                let line = format!(
-                    "{status:>8} {fetch:>8} {stale_marker:>8}  upd={upd}  {key}"
-                );
+                let line = format!("{status:>8} {fetch:>8} {stale_marker:>8}  upd={upd}  {key}");
                 println!("{line}");
                 if !preview.is_empty() {
                     println!("    data: {preview}");

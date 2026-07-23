@@ -36,21 +36,39 @@ impl Client {
     }
 
     pub fn post(&self, path: &str, body: Value) -> Result<Value> {
+        self.post_with_timeout(path, body, std::time::Duration::from_secs(65))
+    }
+
+    pub fn post_with_timeout(
+        &self,
+        path: &str,
+        body: Value,
+        timeout: std::time::Duration,
+    ) -> Result<Value> {
         let resp = self
             .agent
             .post(&format!("{}{}", self.base, path))
             .set("Authorization", &format!("Bearer {}", self.token))
-            // Wait commands can run up to 60s; stretch the per-call ceiling.
-            .timeout(std::time::Duration::from_secs(65))
+            .timeout(timeout)
             .send_json(body);
         normalize_response(resp, path)
     }
 
     pub fn get_with_query(&self, path: &str, params: &[(&str, String)]) -> Result<Value> {
+        self.get_with_query_timeout(path, params, std::time::Duration::from_secs(5))
+    }
+
+    pub fn get_with_query_timeout(
+        &self,
+        path: &str,
+        params: &[(&str, String)],
+        timeout: std::time::Duration,
+    ) -> Result<Value> {
         let mut req = self
             .agent
             .get(&format!("{}{}", self.base, path))
-            .set("Authorization", &format!("Bearer {}", self.token));
+            .set("Authorization", &format!("Bearer {}", self.token))
+            .timeout(timeout);
         for (k, v) in params {
             req = req.query(k, v);
         }
@@ -58,10 +76,7 @@ impl Client {
     }
 }
 
-fn normalize_response(
-    resp: Result<ureq::Response, ureq::Error>,
-    path: &str,
-) -> Result<Value> {
+fn normalize_response(resp: Result<ureq::Response, ureq::Error>, path: &str) -> Result<Value> {
     match resp {
         Ok(r) => {
             // Empty 200 from write endpoints — we still want valid JSON
