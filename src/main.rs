@@ -208,8 +208,11 @@ enum Command {
     #[command(name = "terminal-read")]
     TerminalRead {
         /// Leaf id of the terminal pane. Defaults to the focused pane.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "session")]
         pane: Option<String>,
+        /// Stable terminal session id. Reads directly from the Rust PTY ring.
+        #[arg(long, conflicts_with = "pane")]
+        session: Option<String>,
         /// Tail size in bytes. Default returns the entire buffer (per-session
         /// cap is 256 KiB).
         #[arg(long)]
@@ -237,8 +240,11 @@ enum Command {
         #[arg(long = "key")]
         keys: Vec<String>,
         /// Leaf id of the terminal pane. Defaults to the focused pane.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "session")]
         pane: Option<String>,
+        /// Stable terminal session id. Writes directly to the Rust PTY.
+        #[arg(long, conflicts_with = "pane")]
+        session: Option<String>,
     },
 
     /// Dump the TanStack Query cache: keys, statuses, last update times.
@@ -271,6 +277,12 @@ enum Command {
         payload: String,
     },
 
+    /// Read and update shared scratchpads through the authenticated bridge.
+    Scratchpad {
+        #[command(subcommand)]
+        action: ScratchpadAction,
+    },
+
     /// pkg-browser: drive native child webviews (e.g. partner portals
     /// like Spotify-for-Artists / Bandcamp). Mirrors the
     /// `@ikenga/mcp-browser` MCP server's tools; useful for scripting,
@@ -286,6 +298,55 @@ enum Command {
         pkg_id: String,
         #[command(subcommand)]
         action: BrowserAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum ScratchpadAction {
+    /// Read a scratchpad.
+    Get {
+        #[arg(long)]
+        scope: Option<String>,
+        #[arg(long)]
+        name: String,
+    },
+    /// Replace a scratchpad's body.
+    Set {
+        #[arg(long)]
+        scope: Option<String>,
+        #[arg(long)]
+        name: String,
+        #[arg(long, conflicts_with = "body_file", required_unless_present = "body_file")]
+        body: Option<String>,
+        #[arg(long, value_name = "PATH")]
+        body_file: Option<String>,
+    },
+    /// Append to a scratchpad.
+    Append {
+        #[arg(long)]
+        scope: Option<String>,
+        #[arg(long)]
+        name: String,
+        #[arg(long, conflicts_with = "body_file", required_unless_present = "body_file")]
+        body: Option<String>,
+        #[arg(long, value_name = "PATH")]
+        body_file: Option<String>,
+        #[arg(long)]
+        no_separator: bool,
+    },
+    /// List scratchpads in a scope.
+    List {
+        #[arg(long)]
+        scope: Option<String>,
+    },
+    /// Print the current body and subsequent updates until interrupted.
+    Watch {
+        #[arg(long)]
+        scope: Option<String>,
+        #[arg(long)]
+        name: String,
+        #[arg(long, default_value_t = 1000)]
+        interval_ms: u64,
     },
 }
 
@@ -792,10 +853,18 @@ fn run() -> Result<()> {
             let v = client.post("/iyke/key", body)?;
             print_write_result(&format!("key {combo}"), &v, fmt);
         }
-        Command::TerminalRead { pane, bytes, raw } => {
+        Command::TerminalRead {
+            pane,
+            session,
+            bytes,
+            raw,
+        } => {
             let mut q: Vec<(&str, String)> = Vec::new();
             if let Some(p) = &pane {
                 q.push(("pane", p.clone()));
+            }
+            if let Some(session) = &session {
+                q.push(("session", session.clone()));
             }
             if let Some(b) = bytes {
                 q.push(("bytes", b.to_string()));
@@ -820,7 +889,12 @@ fn run() -> Result<()> {
                 }
             }
         }
-        Command::TerminalSend { text, keys, pane } => {
+        Command::TerminalSend {
+            text,
+            keys,
+            pane,
+            session,
+        } => {
             if text.is_none() && keys.is_empty() {
                 return Err(anyhow!(
                     "terminal-send: must provide text and/or at least one --key"
@@ -829,6 +903,7 @@ fn run() -> Result<()> {
             let data = text.as_deref().map(interpret_backslash_escapes);
             let body = json!({
                 "pane": pane,
+                "session": session,
                 "data": data,
                 "keys": keys,
             });
@@ -866,12 +941,137 @@ fn run() -> Result<()> {
             )?;
             print_write_result(&format!("iframe-send {pane} {kind}"), &v, fmt);
         }
+        Command::Scratchpad { action } => {
+            run_scratchpad(&client, action, fmt)?;
+        }
         Command::Browser { pkg_id, action } => {
             run_browser(&client, &pkg_id, action, fmt)?;
         }
     }
 
     Ok(())
+}
+
+fn run_scratchpad(client: &Client, action: ScratchpadAction, fmt: Format) -> Result<()> {
+    match action {
+        ScratchpadAction::Get { scope, name } => {
+            let mut q = vec![("name", name)];
+            if let Some(scope) = scope {
+                q.push(("scope", scope));
+            }
+            let value = client.get_with_query("/iyke/scratchpad/read", &q)?;
+            print_scratchpad(&value, fmt);
+        }
+        ScratchpadAction::Set {
+            scope,
+            name,
+            body,
+            body_file,
+        } => {
+            let body = load_body(body, body_file)?;
+            let value = client.post(
+                "/iyke/scratchpad/write",
+                json!({ "scope": scope, "name": name, "body": body }),
+            )?;
+            print_write_result("scratchpad set", &value, fmt);
+        }
+        ScratchpadAction::Append {
+            scope,
+            name,
+            body,
+            body_file,
+            no_separator,
+        } => {
+            let body = load_body(body, body_file)?;
+            let value = client.post(
+                "/iyke/scratchpad/append",
+                json!({
+                    "scope": scope,
+                    "name": name,
+                    "body": body,
+                    "with_separator": !no_separator,
+                }),
+            )?;
+            print_write_result("scratchpad append", &value, fmt);
+        }
+        ScratchpadAction::List { scope } => {
+            let q = scope.map(|scope| vec![("scope", scope)]).unwrap_or_default();
+            let value = client.get_with_query("/iyke/scratchpad/list", &q)?;
+            print_scratchpad_list(&value, fmt);
+        }
+        ScratchpadAction::Watch {
+            scope,
+            name,
+            interval_ms,
+        } => {
+            let mut since = -1_i64;
+            loop {
+                let mut q = vec![("name", name.clone()), ("since", since.to_string())];
+                if let Some(scope) = &scope {
+                    q.push(("scope", scope.clone()));
+                }
+                let value = client.get_with_query("/iyke/scratchpad/watch", &q)?;
+                if value.get("updated").and_then(|v| v.as_bool()) == Some(true) {
+                    since = value
+                        .get("updated_at")
+                        .and_then(|v| v.as_i64())
+                        .unwrap_or(since);
+                    print_scratchpad(&value, fmt);
+                }
+                std::thread::sleep(std::time::Duration::from_millis(interval_ms));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn load_body(body: Option<String>, body_file: Option<String>) -> Result<String> {
+    match (body, body_file) {
+        (Some(body), None) => Ok(body),
+        (None, Some(path)) => std::fs::read_to_string(&path)
+            .map_err(|e| anyhow!("read scratchpad body file {path:?}: {e}")),
+        _ => Err(anyhow!("must provide exactly one of --body or --body-file")),
+    }
+}
+
+fn print_scratchpad(value: &serde_json::Value, fmt: Format) {
+    match fmt {
+        Format::Json => println!("{}", value),
+        Format::Human => {
+            if let Some(body) = value.get("body").and_then(|v| v.as_str()) {
+                print!("{body}");
+                if !body.ends_with('\n') {
+                    println!();
+                }
+            }
+        }
+    }
+}
+
+fn print_scratchpad_list(value: &serde_json::Value, fmt: Format) {
+    match fmt {
+        Format::Json => println!("{}", value),
+        Format::Human => {
+            let items = value
+                .get("scratchpads")
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default();
+            if items.is_empty() {
+                println!("(no scratchpads)");
+            } else {
+                for item in items {
+                    let name = item.get("name").and_then(|v| v.as_str()).unwrap_or("?");
+                    let updated_at = item
+                        .get("updated_at")
+                        .and_then(|v| v.as_i64())
+                        .unwrap_or(0);
+                    let preview = item.get("preview").and_then(|v| v.as_str()).unwrap_or("");
+                    println!("{updated_at}  {name}  {}", preview.replace('\n', " "));
+                }
+            }
+        }
+    }
 }
 
 /// Interpret a handful of common backslash escapes in CLI input so users
@@ -1248,5 +1448,127 @@ mod tests {
         // The wire strings the shell's engine router (WP-07) matches on.
         assert_eq!(Engine::Webkit.as_str(), "webkit");
         assert_eq!(Engine::Chrome.as_str(), "chrome");
+    }
+
+    #[test]
+    fn parses_scratchpad_set() {
+        let cli = Cli::try_parse_from([
+            "iyke",
+            "scratchpad",
+            "set",
+            "--scope",
+            "project:royalti-co",
+            "--name",
+            "handoff",
+            "--body",
+            "ready",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Scratchpad {
+                action:
+                    ScratchpadAction::Set {
+                        scope,
+                        name,
+                        body,
+                        body_file,
+                    },
+            } => {
+                assert_eq!(scope.as_deref(), Some("project:royalti-co"));
+                assert_eq!(name, "handoff");
+                assert_eq!(body.as_deref(), Some("ready"));
+                assert!(body_file.is_none());
+            }
+            _ => panic!("expected scratchpad set"),
+        }
+    }
+
+    #[test]
+    fn parses_terminal_session_addressing() {
+        let read = Cli::try_parse_from([
+            "iyke",
+            "terminal-read",
+            "--session",
+            "session-123",
+            "--bytes",
+            "4096",
+        ])
+        .unwrap();
+        match read.command {
+            Command::TerminalRead {
+                pane,
+                session,
+                bytes,
+                raw,
+            } => {
+                assert!(pane.is_none());
+                assert_eq!(session.as_deref(), Some("session-123"));
+                assert_eq!(bytes, Some(4096));
+                assert!(!raw);
+            }
+            _ => panic!("expected terminal-read"),
+        }
+
+        let send = Cli::try_parse_from([
+            "iyke",
+            "terminal-send",
+            "hello",
+            "--session",
+            "session-123",
+            "--key",
+            "Enter",
+        ])
+        .unwrap();
+        match send.command {
+            Command::TerminalSend {
+                text,
+                keys,
+                pane,
+                session,
+            } => {
+                assert_eq!(text.as_deref(), Some("hello"));
+                assert_eq!(keys, vec!["Enter"]);
+                assert!(pane.is_none());
+                assert_eq!(session.as_deref(), Some("session-123"));
+            }
+            _ => panic!("expected terminal-send"),
+        }
+    }
+
+    #[test]
+    fn terminal_addressing_rejects_pane_and_session_together() {
+        assert!(Cli::try_parse_from([
+            "iyke",
+            "terminal-read",
+            "--pane",
+            "leaf-1",
+            "--session",
+            "session-123"
+        ])
+        .is_err());
+    }
+
+    #[test]
+    fn scratchpad_set_requires_exactly_one_body_source() {
+        assert!(Cli::try_parse_from([
+            "iyke",
+            "scratchpad",
+            "set",
+            "--name",
+            "handoff"
+        ])
+        .is_err());
+        assert!(Cli::try_parse_from([
+            "iyke",
+            "scratchpad",
+            "set",
+            "--name",
+            "handoff",
+            "--body",
+            "ready",
+            "--body-file",
+            "body.md"
+        ])
+        .is_err());
     }
 }
