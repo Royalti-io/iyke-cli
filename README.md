@@ -94,6 +94,23 @@ iyke task complete "$TASK_ID" --task-result "merged in #74"
 Add `--json` to any command for machine-readable output. If the desktop app is not running,
 every command exits non-zero with a clear message instead of hanging.
 
+## Testing
+
+`cargo test` covers argument parsing only — it proves clap accepts the flags,
+nothing about what goes on the wire. For the terminal / inbox / task surface,
+run the live suite against a running shell:
+
+```bash
+bun run tauri dev            # in the shell repo first
+./scripts/live-test.sh       # 23 checks: real PTYs, leases, timer→inbox
+```
+
+It creates and reclaims its own terminals. Note the shell writes `control.json`
+during Rust setup, *before* the webview registers its `iyke://` listeners — so
+frontend-backed endpoints (`terminal-spawn`, `dom`) return `503 … timed out`
+until then. The script waits for a real frontend round-trip rather than for the
+control file; if you write your own harness, do the same.
+
 ## Links
 
 - [`ikenga-cli`](https://github.com/Royalti-io/ikenga-cli) — the package manager (the *other* CLI)
