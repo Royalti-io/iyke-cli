@@ -41,8 +41,14 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Print the current shell state (mode, focused route, app info).
+    /// Print the current shell state (mode, windows, terminals, focused route, app info).
     State,
+
+    /// List kernel-authoritative terminal records, including logical and PTY ids.
+    Terminals,
+
+    /// List all primary and detached windows.
+    Windows,
 
     /// Navigate the focused pane to a route path (e.g. `/finance/receivables`).
     Go {
@@ -210,9 +216,21 @@ enum Command {
         /// Leaf id of the terminal pane. Defaults to the focused pane.
         #[arg(long, conflicts_with = "session")]
         pane: Option<String>,
-        /// Stable terminal session id. Reads directly from the Rust PTY ring.
-        #[arg(long, conflicts_with = "pane")]
+        /// Deprecated compatibility alias. Accepts a logical terminal id or PTY id.
+        #[arg(long)]
         session: Option<String>,
+        /// Stable logical terminal id.
+        #[arg(long)]
+        terminal: Option<String>,
+        /// Human-assigned terminal label.
+        #[arg(long)]
+        label: Option<String>,
+        /// Return only output after this absolute stream offset.
+        #[arg(long)]
+        after: Option<u64>,
+        /// Read mode: stream (default) or screen (VT-emulated current screen).
+        #[arg(long, default_value = "stream")]
+        mode: String,
         /// Tail size in bytes. Default returns the entire buffer (per-session
         /// cap is 256 KiB).
         #[arg(long)]
@@ -220,6 +238,9 @@ enum Command {
         /// Return raw bytes (including ANSI/VT escapes). Default strips them.
         #[arg(long)]
         raw: bool,
+        /// Require stable terminal/label/session addressing so pane focus cannot change.
+        #[arg(long)]
+        no_focus: bool,
     },
 
     /// Write to a terminal pane's PTY. Provide `text` (raw bytes — backslash
@@ -242,9 +263,77 @@ enum Command {
         /// Leaf id of the terminal pane. Defaults to the focused pane.
         #[arg(long, conflicts_with = "session")]
         pane: Option<String>,
-        /// Stable terminal session id. Writes directly to the Rust PTY.
-        #[arg(long, conflicts_with = "pane")]
+        /// Deprecated compatibility alias. Accepts a logical terminal id or PTY id.
+        #[arg(long)]
         session: Option<String>,
+        /// Stable logical terminal id.
+        #[arg(long)]
+        terminal: Option<String>,
+        /// Human-assigned terminal label.
+        #[arg(long)]
+        label: Option<String>,
+        /// Refuse the write if the logical terminal now points at a different PTY.
+        #[arg(long)]
+        expected_pty_id: Option<String>,
+        /// Agent identity recorded in the terminal audit ring.
+        #[arg(long)]
+        actor: Option<String>,
+        /// Token returned by `terminal-lease acquire`.
+        #[arg(long)]
+        lease_token: Option<String>,
+        /// Validate and report the target without writing bytes.
+        #[arg(long)]
+        dry_run: bool,
+        /// Explicitly assert that pane focus must not change. Direct targets always satisfy this.
+        #[arg(long)]
+        no_focus: bool,
+    },
+
+    /// Wait for fresh terminal output to match a regex or become idle.
+    #[command(name = "terminal-wait")]
+    TerminalWait {
+        #[arg(long)]
+        terminal: Option<String>,
+        #[arg(long)]
+        label: Option<String>,
+        #[arg(long)]
+        session: Option<String>,
+        #[arg(long)]
+        r#match: Option<String>,
+        #[arg(long)]
+        until_idle_ms: Option<u64>,
+        #[arg(long, default_value_t = 0)]
+        after: u64,
+        #[arg(long, default_value_t = 10_000)]
+        timeout_ms: u64,
+        #[arg(long)]
+        raw: bool,
+    },
+
+    /// Assign or clear a human-readable terminal label.
+    #[command(name = "terminal-label")]
+    TerminalLabel {
+        terminal: String,
+        label: Option<String>,
+        #[arg(long)]
+        clear: bool,
+    },
+
+    /// Acquire or release an enforced terminal writer lease.
+    #[command(name = "terminal-lease")]
+    TerminalLease {
+        #[command(subcommand)]
+        action: TerminalLeaseAction,
+    },
+
+    /// Print the bounded terminal control audit ring.
+    #[command(name = "terminal-audit")]
+    TerminalAudit,
+
+    /// Activate an existing pane tab without focusing the pane.
+    Tab {
+        #[command(subcommand)]
+        action: TabAction,
     },
 
     /// Dump the TanStack Query cache: keys, statuses, last update times.
@@ -302,6 +391,34 @@ enum Command {
 }
 
 #[derive(Subcommand)]
+enum TerminalLeaseAction {
+    Acquire {
+        terminal: String,
+        #[arg(long)]
+        agent_id: String,
+        #[arg(long, default_value_t = 60_000)]
+        ttl_ms: u64,
+    },
+    Release {
+        terminal: String,
+        #[arg(long)]
+        token: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum TabAction {
+    Activate {
+        #[arg(long)]
+        pane: String,
+        #[arg(long)]
+        index: Option<usize>,
+        #[arg(long)]
+        terminal: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
 enum ScratchpadAction {
     /// Read a scratchpad.
     Get {
@@ -316,7 +433,11 @@ enum ScratchpadAction {
         scope: Option<String>,
         #[arg(long)]
         name: String,
-        #[arg(long, conflicts_with = "body_file", required_unless_present = "body_file")]
+        #[arg(
+            long,
+            conflicts_with = "body_file",
+            required_unless_present = "body_file"
+        )]
         body: Option<String>,
         #[arg(long, value_name = "PATH")]
         body_file: Option<String>,
@@ -327,7 +448,11 @@ enum ScratchpadAction {
         scope: Option<String>,
         #[arg(long)]
         name: String,
-        #[arg(long, conflicts_with = "body_file", required_unless_present = "body_file")]
+        #[arg(
+            long,
+            conflicts_with = "body_file",
+            required_unless_present = "body_file"
+        )]
         body: Option<String>,
         #[arg(long, value_name = "PATH")]
         body_file: Option<String>,
@@ -345,8 +470,8 @@ enum ScratchpadAction {
         scope: Option<String>,
         #[arg(long)]
         name: String,
-        #[arg(long, default_value_t = 1000)]
-        interval_ms: u64,
+        #[arg(long, default_value_t = 30_000)]
+        wait_ms: u64,
     },
 }
 
@@ -598,10 +723,7 @@ fn parse_resize_target(target: &str) -> Result<(String, serde_json::Value)> {
         "minimize",
     ];
     if PRESETS.contains(&target) {
-        return Ok((
-            format!("resize {target}"),
-            json!({ "preset": target }),
-        ));
+        return Ok((format!("resize {target}"), json!({ "preset": target })));
     }
     if let Some((w, h)) = target.split_once('x') {
         let w: u32 = w
@@ -659,6 +781,14 @@ fn run() -> Result<()> {
             let v = client.get_state()?;
             print_state(&v, fmt);
         }
+        Command::Terminals => {
+            let v = client.get_with_query("/iyke/terminal/list", &[])?;
+            output::print_terminals(&v, fmt);
+        }
+        Command::Windows => {
+            let v = client.get_with_query("/iyke/windows", &[])?;
+            output::print_windows(&v, fmt);
+        }
         Command::Go { path } => {
             if !path.starts_with('/') {
                 return Err(anyhow!("path must start with '/' (got {path:?})"));
@@ -677,7 +807,12 @@ fn run() -> Result<()> {
                     json!({ "kind": "route", "path": path }),
                 ),
                 OpenKind::Terminal { cmd } => (
-                    format!("open terminal{}", cmd.as_deref().map(|c| format!(" ({c})")).unwrap_or_default()),
+                    format!(
+                        "open terminal{}",
+                        cmd.as_deref()
+                            .map(|c| format!(" ({c})"))
+                            .unwrap_or_default()
+                    ),
                     json!({ "kind": "terminal", "cmd": cmd }),
                 ),
                 OpenKind::Chat { session_id } => (
@@ -710,14 +845,12 @@ fn run() -> Result<()> {
         }
         Command::Focus { target } => {
             let (label, body) = match target {
-                FocusTarget::Id { pane_id } => (
-                    format!("focus {pane_id}"),
-                    json!({ "pane_id": pane_id }),
-                ),
-                FocusTarget::Index { index } => (
-                    format!("focus index {index}"),
-                    json!({ "index": index }),
-                ),
+                FocusTarget::Id { pane_id } => {
+                    (format!("focus {pane_id}"), json!({ "pane_id": pane_id }))
+                }
+                FocusTarget::Index { index } => {
+                    (format!("focus index {index}"), json!({ "index": index }))
+                }
             };
             let v = client.post("/iyke/focus", body)?;
             print_write_result(&label, &v, fmt);
@@ -734,7 +867,10 @@ fn run() -> Result<()> {
             };
             let v = client.post("/iyke/refresh", body)?;
             print_write_result(
-                &format!("refresh{}", pane_id.map(|id| format!(" {id}")).unwrap_or_default()),
+                &format!(
+                    "refresh{}",
+                    pane_id.map(|id| format!(" {id}")).unwrap_or_default()
+                ),
                 &v,
                 fmt,
             );
@@ -746,7 +882,10 @@ fn run() -> Result<()> {
             };
             let v = client.post("/iyke/close", body)?;
             print_write_result(
-                &format!("close{}", pane_id.map(|id| format!(" {id}")).unwrap_or_default()),
+                &format!(
+                    "close{}",
+                    pane_id.map(|id| format!(" {id}")).unwrap_or_default()
+                ),
                 &v,
                 fmt,
             );
@@ -765,7 +904,11 @@ fn run() -> Result<()> {
             let v = client.get_with_query("/iyke/dom", &q)?;
             output::print_dom(&v, fmt);
         }
-        Command::Logs { level, since, source } => {
+        Command::Logs {
+            level,
+            since,
+            source,
+        } => {
             let mut q = Vec::new();
             if let Some(s) = &level {
                 q.push(("level", s.clone()));
@@ -790,7 +933,11 @@ fn run() -> Result<()> {
             let v = client.get_with_query("/iyke/network", &q)?;
             output::print_network(&v, fmt);
         }
-        Command::Screenshot { target, out, pane_id } => {
+        Command::Screenshot {
+            target,
+            out,
+            pane_id,
+        } => {
             let path = match target {
                 ScreenshotTarget::Window => "/iyke/screenshot/window",
                 ScreenshotTarget::Pane => "/iyke/screenshot/pane",
@@ -800,14 +947,18 @@ fn run() -> Result<()> {
                 body.insert("out_path".into(), json!(p));
             }
             if matches!(target, ScreenshotTarget::Pane) {
-                let id = pane_id
-                    .ok_or_else(|| anyhow!("--pane-id required when target=pane"))?;
+                let id = pane_id.ok_or_else(|| anyhow!("--pane-id required when target=pane"))?;
                 body.insert("pane_id".into(), json!(id));
             }
             let v = client.post(path, serde_json::Value::Object(body))?;
             output::print_screenshot(&v, fmt);
         }
-        Command::Wait { kind, value, timeout_ms, pane } => {
+        Command::Wait {
+            kind,
+            value,
+            timeout_ms,
+            pane,
+        } => {
             let body = json!({
                 "kind": kind,
                 "value": value,
@@ -820,7 +971,12 @@ fn run() -> Result<()> {
                 std::process::exit(2);
             }
         }
-        Command::Click { r#ref, selector, text, pane } => {
+        Command::Click {
+            r#ref,
+            selector,
+            text,
+            pane,
+        } => {
             require_one(&r#ref, &selector, &text)?;
             let body = json!({
                 "ref": r#ref,
@@ -831,7 +987,13 @@ fn run() -> Result<()> {
             let v = client.post("/iyke/click", body)?;
             print_write_result("click", &v, fmt);
         }
-        Command::Type { text, r#ref, selector, replace, pane } => {
+        Command::Type {
+            text,
+            r#ref,
+            selector,
+            replace,
+            pane,
+        } => {
             require_one(&r#ref, &selector, &None)?;
             let body = json!({
                 "ref": r#ref,
@@ -843,7 +1005,12 @@ fn run() -> Result<()> {
             let v = client.post("/iyke/type", body)?;
             print_write_result("type", &v, fmt);
         }
-        Command::Key { combo, r#ref, selector, pane } => {
+        Command::Key {
+            combo,
+            r#ref,
+            selector,
+            pane,
+        } => {
             let body = json!({
                 "combo": combo,
                 "ref": r#ref,
@@ -856,9 +1023,20 @@ fn run() -> Result<()> {
         Command::TerminalRead {
             pane,
             session,
+            terminal,
+            label,
+            after,
+            mode,
             bytes,
             raw,
+            no_focus,
         } => {
+            require_at_most_one_target(&pane, &session, &terminal, &label)?;
+            if no_focus && terminal.is_none() && label.is_none() && session.is_none() {
+                return Err(anyhow!(
+                    "--no-focus requires --terminal, --label, or --session"
+                ));
+            }
             let mut q: Vec<(&str, String)> = Vec::new();
             if let Some(p) = &pane {
                 q.push(("pane", p.clone()));
@@ -866,6 +1044,16 @@ fn run() -> Result<()> {
             if let Some(session) = &session {
                 q.push(("session", session.clone()));
             }
+            if let Some(terminal) = &terminal {
+                q.push(("terminal", terminal.clone()));
+            }
+            if let Some(label) = &label {
+                q.push(("label", label.clone()));
+            }
+            if let Some(after) = after {
+                q.push(("after", after.to_string()));
+            }
+            q.push(("mode", mode));
             if let Some(b) = bytes {
                 q.push(("bytes", b.to_string()));
             }
@@ -874,7 +1062,9 @@ fn run() -> Result<()> {
             }
             let v = client.get_with_query("/iyke/terminal/read", &q)?;
             match fmt {
-                Format::Json => println!("{}", serde_json::to_string_pretty(&v).unwrap_or_default()),
+                Format::Json => {
+                    println!("{}", serde_json::to_string_pretty(&v).unwrap_or_default())
+                }
                 Format::Human => {
                     if let Some(err) = v.get("error").and_then(|e| e.as_str()) {
                         eprintln!("terminal-read: {err}");
@@ -894,7 +1084,20 @@ fn run() -> Result<()> {
             keys,
             pane,
             session,
+            terminal,
+            label,
+            expected_pty_id,
+            actor,
+            lease_token,
+            dry_run,
+            no_focus,
         } => {
+            require_at_most_one_target(&pane, &session, &terminal, &label)?;
+            if no_focus && terminal.is_none() && label.is_none() && session.is_none() {
+                return Err(anyhow!(
+                    "--no-focus requires --terminal, --label, or --session"
+                ));
+            }
             if text.is_none() && keys.is_empty() {
                 return Err(anyhow!(
                     "terminal-send: must provide text and/or at least one --key"
@@ -904,18 +1107,122 @@ fn run() -> Result<()> {
             let body = json!({
                 "pane": pane,
                 "session": session,
+                "terminal": terminal,
+                "label": label,
+                "expected_pty_id": expected_pty_id,
+                "actor": actor,
+                "lease_token": lease_token,
+                "dry_run": dry_run,
                 "data": data,
                 "keys": keys,
             });
             let v = client.post("/iyke/terminal/send", body)?;
             let summary = match (&data, keys.is_empty()) {
-                (Some(d), false) => format!("terminal-send text({}b) + {} key(s)", d.len(), keys.len()),
+                (Some(d), false) => {
+                    format!("terminal-send text({}b) + {} key(s)", d.len(), keys.len())
+                }
                 (Some(d), true) => format!("terminal-send text({}b)", d.len()),
                 (None, false) => format!("terminal-send {} key(s)", keys.len()),
                 (None, true) => "terminal-send".into(),
             };
             print_write_result(&summary, &v, fmt);
         }
+        Command::TerminalWait {
+            terminal,
+            label,
+            session,
+            r#match,
+            until_idle_ms,
+            after,
+            timeout_ms,
+            raw,
+        } => {
+            let target = exactly_one_terminal_target(terminal, label, session)?;
+            if r#match.is_none() == until_idle_ms.is_none() {
+                return Err(anyhow!("set exactly one of --match or --until-idle-ms"));
+            }
+            let v = client.post_with_timeout(
+                "/iyke/terminal/wait",
+                json!({
+                    "terminal": target,
+                    "match": r#match,
+                    "until_idle_ms": until_idle_ms,
+                    "after": after,
+                    "timeout_ms": timeout_ms,
+                    "raw": raw,
+                }),
+                std::time::Duration::from_millis(timeout_ms.saturating_add(5_000)),
+            )?;
+            let satisfied = output::print_terminal_wait(&v, fmt);
+            if !satisfied {
+                std::process::exit(2);
+            }
+        }
+        Command::TerminalLabel {
+            terminal,
+            label,
+            clear,
+        } => {
+            if clear == label.is_some() {
+                return Err(anyhow!("provide a label or --clear"));
+            }
+            let v = client.post(
+                "/iyke/terminal/label",
+                json!({ "terminal": terminal, "label": if clear { None } else { label } }),
+            )?;
+            print_write_result("terminal-label", &v, fmt);
+        }
+        Command::TerminalLease { action } => {
+            let (path, body, description) = match action {
+                TerminalLeaseAction::Acquire {
+                    terminal,
+                    agent_id,
+                    ttl_ms,
+                } => (
+                    "/iyke/terminal/lease/acquire",
+                    json!({ "terminal": terminal, "agent_id": agent_id, "ttl_ms": ttl_ms }),
+                    "terminal-lease acquire",
+                ),
+                TerminalLeaseAction::Release { terminal, token } => (
+                    "/iyke/terminal/lease/release",
+                    json!({ "terminal": terminal, "token": token }),
+                    "terminal-lease release",
+                ),
+            };
+            let v = client.post(path, body)?;
+            match fmt {
+                Format::Json => println!("{}", v),
+                Format::Human => {
+                    println!("{}", serde_json::to_string_pretty(&v).unwrap_or_default())
+                }
+            }
+            let _ = description;
+        }
+        Command::TerminalAudit => {
+            let v = client.get_with_query("/iyke/terminal/audit", &[])?;
+            match fmt {
+                Format::Json => println!("{}", v),
+                Format::Human => {
+                    println!("{}", serde_json::to_string_pretty(&v).unwrap_or_default())
+                }
+            }
+        }
+        Command::Tab { action } => match action {
+            TabAction::Activate {
+                pane,
+                index,
+                terminal,
+            } => {
+                if index.is_none() == terminal.is_none() {
+                    return Err(anyhow!("set exactly one of --index or --terminal"));
+                }
+                let v = client.post(
+                    "/iyke/tab/activate",
+                    json!({ "pane": pane, "index": index, "terminal": terminal }),
+                )?;
+                print_write_result("tab activate", &v, fmt);
+            }
+        },
         Command::QueryCache { pane } => {
             let mut q = Vec::new();
             if let Some(p) = &pane {
@@ -932,9 +1239,13 @@ fn run() -> Result<()> {
             let v = client.get_with_query("/iyke/iframe-state", &[("pane", pane.clone())])?;
             output::print_iframe_state(&v, fmt);
         }
-        Command::IframeSend { pane, kind, payload } => {
-            let parsed: serde_json::Value = serde_json::from_str(&payload)
-                .map_err(|e| anyhow!("invalid payload JSON: {e}"))?;
+        Command::IframeSend {
+            pane,
+            kind,
+            payload,
+        } => {
+            let parsed: serde_json::Value =
+                serde_json::from_str(&payload).map_err(|e| anyhow!("invalid payload JSON: {e}"))?;
             let v = client.post(
                 "/iyke/iframe-message",
                 json!({ "pane": pane, "kind": kind, "payload": parsed }),
@@ -995,30 +1306,46 @@ fn run_scratchpad(client: &Client, action: ScratchpadAction, fmt: Format) -> Res
             print_write_result("scratchpad append", &value, fmt);
         }
         ScratchpadAction::List { scope } => {
-            let q = scope.map(|scope| vec![("scope", scope)]).unwrap_or_default();
+            let q = scope
+                .map(|scope| vec![("scope", scope)])
+                .unwrap_or_default();
             let value = client.get_with_query("/iyke/scratchpad/list", &q)?;
             print_scratchpad_list(&value, fmt);
         }
         ScratchpadAction::Watch {
             scope,
             name,
-            interval_ms,
+            wait_ms,
         } => {
+            if wait_ms == 0 {
+                return Err(anyhow!("--wait-ms must be greater than zero"));
+            }
             let mut since = -1_i64;
             loop {
                 let mut q = vec![("name", name.clone()), ("since", since.to_string())];
                 if let Some(scope) = &scope {
                     q.push(("scope", scope.clone()));
                 }
-                let value = client.get_with_query("/iyke/scratchpad/watch", &q)?;
+                q.push(("wait_ms", wait_ms.to_string()));
+                let value = client.get_with_query_timeout(
+                    "/iyke/scratchpad/watch",
+                    &q,
+                    std::time::Duration::from_millis(wait_ms.saturating_add(5_000)),
+                )?;
                 if value.get("updated").and_then(|v| v.as_bool()) == Some(true) {
                     since = value
                         .get("updated_at")
                         .and_then(|v| v.as_i64())
                         .unwrap_or(since);
-                    print_scratchpad(&value, fmt);
+                    if value.get("deleted").and_then(|v| v.as_bool()) == Some(true) {
+                        match fmt {
+                            Format::Json => println!("{}", value),
+                            Format::Human => println!("(scratchpad deleted)"),
+                        }
+                    } else {
+                        print_scratchpad(&value, fmt);
+                    }
                 }
-                std::thread::sleep(std::time::Duration::from_millis(interval_ms));
             }
         }
     }
@@ -1062,10 +1389,7 @@ fn print_scratchpad_list(value: &serde_json::Value, fmt: Format) {
             } else {
                 for item in items {
                     let name = item.get("name").and_then(|v| v.as_str()).unwrap_or("?");
-                    let updated_at = item
-                        .get("updated_at")
-                        .and_then(|v| v.as_i64())
-                        .unwrap_or(0);
+                    let updated_at = item.get("updated_at").and_then(|v| v.as_i64()).unwrap_or(0);
                     let preview = item.get("preview").and_then(|v| v.as_str()).unwrap_or("");
                     println!("{updated_at}  {name}  {}", preview.replace('\n', " "));
                 }
@@ -1137,28 +1461,33 @@ fn parse_rect(s: &str) -> Result<serde_json::Value> {
     let (w, h) = s
         .split_once('x')
         .ok_or_else(|| anyhow!("rect must be <W>x<H> (got {s:?})"))?;
-    let w: u32 = w.parse().map_err(|_| anyhow!("rect width not an integer: {s:?}"))?;
-    let h: u32 = h.parse().map_err(|_| anyhow!("rect height not an integer: {s:?}"))?;
+    let w: u32 = w
+        .parse()
+        .map_err(|_| anyhow!("rect width not an integer: {s:?}"))?;
+    let h: u32 = h
+        .parse()
+        .map_err(|_| anyhow!("rect height not an integer: {s:?}"))?;
     Ok(json!({ "x": 0, "y": 0, "w": w, "h": h }))
 }
 
-fn run_browser(
-    client: &Client,
-    pkg_id: &str,
-    action: BrowserAction,
-    fmt: Format,
-) -> Result<()> {
+fn run_browser(client: &Client, pkg_id: &str, action: BrowserAction, fmt: Format) -> Result<()> {
     match action {
         BrowserAction::ChromeProfiles => {
             let v = client.get_with_query("/iyke/browser/profiles", &[])?;
             match fmt {
-                Format::Json => println!("{}", serde_json::to_string_pretty(&v).unwrap_or_default()),
+                Format::Json => {
+                    println!("{}", serde_json::to_string_pretty(&v).unwrap_or_default())
+                }
                 Format::Human => {
                     if let Some(err) = v.get("error").and_then(|e| e.as_str()) {
                         eprintln!("browser profiles: {err}");
                         std::process::exit(1);
                     }
-                    let profiles = v.get("profiles").and_then(|p| p.as_array()).map(|a| a.as_slice()).unwrap_or(&[]);
+                    let profiles = v
+                        .get("profiles")
+                        .and_then(|p| p.as_array())
+                        .map(|a| a.as_slice())
+                        .unwrap_or(&[]);
                     if profiles.is_empty() {
                         println!("No Chrome profiles found.");
                     } else {
@@ -1167,8 +1496,14 @@ fn run_browser(
                         for p in profiles {
                             let dir = p.get("dir").and_then(|d| d.as_str()).unwrap_or("-");
                             let name = p.get("name").and_then(|n| n.as_str()).unwrap_or("-");
-                            let running = p.get("running").and_then(|r| r.as_bool()).unwrap_or(false);
-                            println!("{:<20} {:<30} {}", dir, name, if running { "yes" } else { "no" });
+                            let running =
+                                p.get("running").and_then(|r| r.as_bool()).unwrap_or(false);
+                            println!(
+                                "{:<20} {:<30} {}",
+                                dir,
+                                name,
+                                if running { "yes" } else { "no" }
+                            );
                         }
                     }
                 }
@@ -1177,7 +1512,9 @@ fn run_browser(
         BrowserAction::ChromeTargets => {
             let v = client.get_with_query("/iyke/browser/targets", &[])?;
             match fmt {
-                Format::Json => println!("{}", serde_json::to_string_pretty(&v).unwrap_or_default()),
+                Format::Json => {
+                    println!("{}", serde_json::to_string_pretty(&v).unwrap_or_default())
+                }
                 Format::Human => {
                     if let Some(err) = v.get("error").and_then(|e| e.as_str()) {
                         eprintln!("browser targets: {err}");
@@ -1191,7 +1528,11 @@ fn run_browser(
                         return Ok(());
                     }
                     println!("Endpoint: {}", endpoint.unwrap_or("-"));
-                    let targets = v.get("targets").and_then(|t| t.as_array()).map(|a| a.as_slice()).unwrap_or(&[]);
+                    let targets = v
+                        .get("targets")
+                        .and_then(|t| t.as_array())
+                        .map(|a| a.as_slice())
+                        .unwrap_or(&[]);
                     if targets.is_empty() {
                         println!("No open tabs/windows.");
                     } else {
@@ -1202,7 +1543,11 @@ fn run_browser(
                             let kind = t.get("kind").and_then(|k| k.as_str()).unwrap_or("-");
                             let title = t.get("title").and_then(|t| t.as_str()).unwrap_or("");
                             let url = t.get("url").and_then(|u| u.as_str()).unwrap_or("-");
-                            let label = if title.is_empty() { url.to_string() } else { format!("{title}  ({url})") };
+                            let label = if title.is_empty() {
+                                url.to_string()
+                            } else {
+                                format!("{title}  ({url})")
+                            };
                             println!("{:<40} {:<10} {}", id, kind, label);
                         }
                     }
@@ -1215,18 +1560,32 @@ fn run_browser(
                 json!({ "dir": dir, "port": port }),
             )?;
             match fmt {
-                Format::Json => println!("{}", serde_json::to_string_pretty(&v).unwrap_or_default()),
+                Format::Json => {
+                    println!("{}", serde_json::to_string_pretty(&v).unwrap_or_default())
+                }
                 Format::Human => {
                     if let Some(err) = v.get("error").and_then(|e| e.as_str()) {
                         eprintln!("browser launch-profile: {err}");
                         std::process::exit(1);
                     }
-                    let endpoint = v.get("endpoint").and_then(|e| e.as_str()).unwrap_or("unknown");
+                    let endpoint = v
+                        .get("endpoint")
+                        .and_then(|e| e.as_str())
+                        .unwrap_or("unknown");
                     println!("Launched Chrome profile '{dir}' — CDP endpoint: {endpoint}");
                 }
             }
         }
-        BrowserAction::Open { pane_id, url, session, partition, rect, engine, mode, attach_target } => {
+        BrowserAction::Open {
+            pane_id,
+            url,
+            session,
+            partition,
+            rect,
+            engine,
+            mode,
+            attach_target,
+        } => {
             if session.is_some() && partition.is_some() {
                 return Err(anyhow!("pass at most one of --session / --partition"));
             }
@@ -1235,7 +1594,12 @@ fn run_browser(
                     "/iyke/browser/session/resolve",
                     json!({ "pkg_id": pkg_id, "name": name }),
                 )?;
-                Some(v.get("partition").and_then(|p| p.as_str()).ok_or_else(|| anyhow!("session resolve returned no partition"))?.to_string())
+                Some(
+                    v.get("partition")
+                        .and_then(|p| p.as_str())
+                        .ok_or_else(|| anyhow!("session resolve returned no partition"))?
+                        .to_string(),
+                )
             } else {
                 partition
             };
@@ -1260,10 +1624,8 @@ fn run_browser(
             print_write_result(&format!("browser close {pane_id}"), &v, fmt);
         }
         BrowserAction::List => {
-            let v = client.get_with_query(
-                "/iyke/browser/list",
-                &[("pkg_id", pkg_id.to_string())],
-            )?;
+            let v =
+                client.get_with_query("/iyke/browser/list", &[("pkg_id", pkg_id.to_string())])?;
             print_write_result("browser list", &v, fmt);
         }
         BrowserAction::Focus { pane_id } => {
@@ -1301,7 +1663,11 @@ fn run_browser(
             )?;
             print_write_result(&format!("browser reload {pane_id}"), &v, fmt);
         }
-        BrowserAction::Snapshot { pane_id, query, all } => {
+        BrowserAction::Snapshot {
+            pane_id,
+            query,
+            all,
+        } => {
             let v = client.post(
                 "/iyke/browser/snapshot",
                 json!({ "pkg_id": pkg_id, "pane_id": pane_id, "query": query, "all": all }),
@@ -1313,9 +1679,18 @@ fn run_browser(
                 "/iyke/browser/read-text",
                 json!({ "pkg_id": pkg_id, "pane_id": pane_id, "ref": r#ref }),
             )?;
-            print_write_result(&format!("browser read-text {pane_id} {ref_}", ref_ = r#ref), &v, fmt);
+            print_write_result(
+                &format!("browser read-text {pane_id} {ref_}", ref_ = r#ref),
+                &v,
+                fmt,
+            );
         }
-        BrowserAction::Click { pane_id, r#ref, selector, text } => {
+        BrowserAction::Click {
+            pane_id,
+            r#ref,
+            selector,
+            text,
+        } => {
             require_one(&r#ref, &selector, &text)?;
             let v = client.post(
                 "/iyke/browser/click",
@@ -1326,7 +1701,13 @@ fn run_browser(
             )?;
             print_write_result(&format!("browser click {pane_id}"), &v, fmt);
         }
-        BrowserAction::Fill { pane_id, text, r#ref, selector, replace } => {
+        BrowserAction::Fill {
+            pane_id,
+            text,
+            r#ref,
+            selector,
+            replace,
+        } => {
             require_one(&r#ref, &selector, &None)?;
             let v = client.post(
                 "/iyke/browser/fill",
@@ -1337,7 +1718,12 @@ fn run_browser(
             )?;
             print_write_result(&format!("browser fill {pane_id}"), &v, fmt);
         }
-        BrowserAction::Select { pane_id, value, r#ref, selector } => {
+        BrowserAction::Select {
+            pane_id,
+            value,
+            r#ref,
+            selector,
+        } => {
             require_one(&r#ref, &selector, &None)?;
             let v = client.post(
                 "/iyke/browser/select",
@@ -1348,7 +1734,12 @@ fn run_browser(
             )?;
             print_write_result(&format!("browser select {pane_id} {value}"), &v, fmt);
         }
-        BrowserAction::PressKey { pane_id, combo, r#ref, selector } => {
+        BrowserAction::PressKey {
+            pane_id,
+            combo,
+            r#ref,
+            selector,
+        } => {
             let v = client.post(
                 "/iyke/browser/press-key",
                 json!({
@@ -1358,7 +1749,12 @@ fn run_browser(
             )?;
             print_write_result(&format!("browser press-key {pane_id} {combo}"), &v, fmt);
         }
-        BrowserAction::WaitFor { pane_id, kind, value, timeout_ms } => {
+        BrowserAction::WaitFor {
+            pane_id,
+            kind,
+            value,
+            timeout_ms,
+        } => {
             let value_field: serde_json::Value = if value.is_empty() {
                 serde_json::Value::Null
             } else {
@@ -1371,8 +1767,15 @@ fn run_browser(
                     "value": value_field, "timeout_ms": timeout_ms,
                 }),
             )?;
-            let satisfied = v.get("satisfied").and_then(|s| s.as_bool()).unwrap_or(false);
-            print_write_result(&format!("browser wait-for {pane_id} {kind}={value}"), &v, fmt);
+            let satisfied = v
+                .get("satisfied")
+                .and_then(|s| s.as_bool())
+                .unwrap_or(false);
+            print_write_result(
+                &format!("browser wait-for {pane_id} {kind}={value}"),
+                &v,
+                fmt,
+            );
             if !satisfied {
                 std::process::exit(2);
             }
@@ -1423,6 +1826,41 @@ fn run_browser(
         },
     }
     Ok(())
+}
+
+fn require_at_most_one_target(
+    pane: &Option<String>,
+    session: &Option<String>,
+    terminal: &Option<String>,
+    label: &Option<String>,
+) -> Result<()> {
+    let count = pane.is_some() as u8
+        + session.is_some() as u8
+        + terminal.is_some() as u8
+        + label.is_some() as u8;
+    if count > 1 {
+        return Err(anyhow!(
+            "must supply at most one of: --pane, --session, --terminal, --label"
+        ));
+    }
+    Ok(())
+}
+
+fn exactly_one_terminal_target(
+    terminal: Option<String>,
+    label: Option<String>,
+    session: Option<String>,
+) -> Result<String> {
+    let targets = [terminal, label, session]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+    if targets.len() != 1 {
+        return Err(anyhow!(
+            "must supply exactly one of: --terminal, --label, --session"
+        ));
+    }
+    Ok(targets.into_iter().next().expect("one target"))
 }
 
 fn require_one(
@@ -1500,6 +1938,7 @@ mod tests {
                 session,
                 bytes,
                 raw,
+                ..
             } => {
                 assert!(pane.is_none());
                 assert_eq!(session.as_deref(), Some("session-123"));
@@ -1525,6 +1964,7 @@ mod tests {
                 keys,
                 pane,
                 session,
+                ..
             } => {
                 assert_eq!(text.as_deref(), Some("hello"));
                 assert_eq!(keys, vec!["Enter"]);
@@ -1533,6 +1973,68 @@ mod tests {
             }
             _ => panic!("expected terminal-send"),
         }
+    }
+
+    #[test]
+    fn parses_terminal_control_plane_commands() {
+        let read = Cli::try_parse_from([
+            "iyke",
+            "terminal-read",
+            "--terminal",
+            "terminal-1",
+            "--after",
+            "42",
+            "--mode",
+            "screen",
+        ])
+        .unwrap();
+        assert!(matches!(
+            read.command,
+            Command::TerminalRead {
+                terminal: Some(ref id),
+                after: Some(42),
+                ref mode,
+                ..
+            } if id == "terminal-1" && mode == "screen"
+        ));
+
+        let wait = Cli::try_parse_from([
+            "iyke",
+            "terminal-wait",
+            "--label",
+            "reviewer",
+            "--match",
+            "READY",
+        ])
+        .unwrap();
+        assert!(matches!(
+            wait.command,
+            Command::TerminalWait {
+                label: Some(ref label),
+                r#match: Some(ref pattern),
+                ..
+            } if label == "reviewer" && pattern == "READY"
+        ));
+
+        assert!(Cli::try_parse_from([
+            "iyke",
+            "terminal-lease",
+            "acquire",
+            "terminal-1",
+            "--agent-id",
+            "orchestrator",
+        ])
+        .is_ok());
+        assert!(Cli::try_parse_from([
+            "iyke",
+            "tab",
+            "activate",
+            "--pane",
+            "leaf-1",
+            "--terminal",
+            "terminal-1",
+        ])
+        .is_ok());
     }
 
     #[test]
@@ -1550,14 +2052,7 @@ mod tests {
 
     #[test]
     fn scratchpad_set_requires_exactly_one_body_source() {
-        assert!(Cli::try_parse_from([
-            "iyke",
-            "scratchpad",
-            "set",
-            "--name",
-            "handoff"
-        ])
-        .is_err());
+        assert!(Cli::try_parse_from(["iyke", "scratchpad", "set", "--name", "handoff"]).is_err());
         assert!(Cli::try_parse_from([
             "iyke",
             "scratchpad",

@@ -43,6 +43,28 @@ iyke open mini-app video-engine
 iyke split horizontal                # split the focused pane side-by-side
 iyke focus index 2                   # focus the 2nd leaf pane (matches ⌃2)
 iyke close                           # close the focused pane
+
+# Kernel-authoritative terminal orchestration
+TERMINAL=$(iyke --json terminals | jq -r '.[0].terminal_id')
+iyke terminal-label "$TERMINAL" reviewer
+iyke terminal-read --label reviewer --after 0
+CURSOR=$(iyke --json terminal-read --label reviewer | jq -r .end_offset)
+iyke terminal-send "run checks" --label reviewer --key Enter --no-focus --actor orchestrator
+iyke terminal-wait --label reviewer --after "$CURSOR" --match 'READY|FAILED'
+iyke terminal-read --label reviewer --mode screen
+
+# Optional writer exclusion and restart guards
+LEASE=$(iyke --json terminal-lease acquire "$TERMINAL" --agent-id orchestrator | jq -r .token)
+PTY=$(iyke --json terminals | jq -r --arg id "$TERMINAL" '.[] | select(.terminal_id == $id) | .pty_id')
+iyke terminal-send "continue" --terminal "$TERMINAL" --key Enter \
+  --expected-pty-id "$PTY" --lease-token "$LEASE" --actor orchestrator
+
+iyke terminal-lease release "$TERMINAL" --token "$LEASE"
+
+# Shared coordination store with event-driven long polling
+
+iyke scratchpad set --scope project:royalti-co --name handoff --body ready
+iyke scratchpad watch --scope project:royalti-co --name handoff
 ```
 
 Add `--json` to any command for machine-readable output. If the desktop app is not running,
