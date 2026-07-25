@@ -15,7 +15,7 @@ mod output;
 
 use anyhow::{anyhow, Result};
 use clap::{Parser, Subcommand, ValueEnum};
-use serde_json::json;
+use serde_json::{json, Value};
 
 use crate::api::Client;
 use crate::control::{LoadOutcome, STALE_THRESHOLD_SECS};
@@ -310,6 +310,50 @@ enum Command {
         raw: bool,
     },
 
+    /// Spawn a new terminal tab and print its descriptor.
+    ///
+    /// The tab is an ordinary one — visible in the pane tree, poppable,
+    /// and takeable over by a human. Pass `--lease-for` to own it from
+    /// birth, closing the window between spawn and a separate lease call
+    /// in which anyone else could write to it.
+    #[command(name = "terminal-spawn")]
+    TerminalSpawn {
+        /// Working directory. Defaults to the shell's active-project cwd.
+        #[arg(long)]
+        cwd: Option<String>,
+        /// Tab title.
+        #[arg(long)]
+        title: Option<String>,
+        /// Unique label to assign once the pty exists, so later commands
+        /// can address this terminal by role rather than by id.
+        #[arg(long)]
+        label: Option<String>,
+        /// Target pane leaf id. Defaults to the focused pane.
+        #[arg(long)]
+        pane: Option<String>,
+        /// Acquire a writer lease for this agent id and print the token.
+        #[arg(long)]
+        lease_for: Option<String>,
+        /// Lease TTL. Only meaningful with --lease-for.
+        #[arg(long, requires = "lease_for")]
+        lease_ttl_ms: Option<u64>,
+        /// Command + args to run, after `--`. Defaults to the login shell.
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        argv: Vec<String>,
+    },
+
+    /// Kill a terminal's process. Addressed by terminal id, pty id, or label.
+    ///
+    /// The tab stays by default, showing its exit status — the same thing
+    /// that happens when a shell exits on its own, and it keeps the
+    /// scrollback readable for a post-mortem. Pass --close-tab to remove it.
+    #[command(name = "terminal-kill")]
+    TerminalKill {
+        terminal: String,
+        #[arg(long)]
+        close_tab: bool,
+    },
+
     /// Assign or clear a human-readable terminal label.
     #[command(name = "terminal-label")]
     TerminalLabel {
@@ -329,6 +373,30 @@ enum Command {
     /// Print the bounded terminal control audit ring.
     #[command(name = "terminal-audit")]
     TerminalAudit,
+
+    /// Register an agent id with the shell.
+    ///
+    /// Scheduling a timer against an unregistered id is rejected, so this
+    /// is the first call in most orchestration scripts.
+    Agent {
+        #[command(subcommand)]
+        action: AgentAction,
+    },
+
+    /// Read and acknowledge the agent inbox that due timers fire into.
+    Inbox {
+        #[command(subcommand)]
+        action: InboxAction,
+    },
+
+    /// The durable task board, shared with the human.
+    ///
+    /// Distinct from the per-run coordination todos: tasks outlive a
+    /// single agent run and are what the human actually works from.
+    Task {
+        #[command(subcommand)]
+        action: TaskAction,
+    },
 
     /// Activate an existing pane tab without focusing the pane.
     Tab {
@@ -387,6 +455,115 @@ enum Command {
         pkg_id: String,
         #[command(subcommand)]
         action: BrowserAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum AgentAction {
+    /// Register (or refresh) an agent. Prints the id the shell recorded —
+    /// pass `--id` to choose it yourself, otherwise the shell mints one.
+    Register {
+        #[arg(long)]
+        id: Option<String>,
+        #[arg(long)]
+        name: String,
+        #[arg(long)]
+        model: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum InboxAction {
+    /// List entries for an agent, oldest first.
+    ///
+    /// `next_since` in the response is the cursor: feed it back as
+    /// `--since` to get only what arrived after this batch.
+    List {
+        #[arg(long)]
+        agent_id: String,
+        /// Exclusive cursor — only entries created after this timestamp.
+        #[arg(long, default_value_t = 0)]
+        since: i64,
+        #[arg(long)]
+        limit: Option<i64>,
+        /// Acknowledge everything listed once it has been printed, so a
+        /// plain re-run returns only new entries. Acknowledging DELETES:
+        /// the entries are gone after this, cursor or not.
+        #[arg(long)]
+        ack: bool,
+    },
+    /// Acknowledge entries by id, deleting them from the queue.
+    Ack {
+        #[arg(long = "id", value_name = "ID", required = true)]
+        ids: Vec<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum TaskAction {
+    /// List tasks, most recently touched first.
+    List {
+        #[arg(long)]
+        status: Option<String>,
+        #[arg(long)]
+        assigned_to: Option<String>,
+        #[arg(long)]
+        project_path: Option<String>,
+        #[arg(long)]
+        limit: Option<i64>,
+    },
+    /// Create a task. Prints the new id.
+    Create {
+        title: String,
+        #[arg(long)]
+        description: Option<String>,
+        /// Defaults to `pending` shell-side.
+        #[arg(long)]
+        status: Option<String>,
+        /// Defaults to `medium` shell-side.
+        #[arg(long)]
+        priority: Option<String>,
+        #[arg(long)]
+        assigned_to: Option<String>,
+        #[arg(long)]
+        project_path: Option<String>,
+        #[arg(long)]
+        due_date: Option<String>,
+        /// Recorded on the task event. Defaults to `iyke` shell-side.
+        #[arg(long)]
+        actor: Option<String>,
+    },
+    /// Update a task's fields. At least one field is required.
+    Update {
+        id: String,
+        #[arg(long)]
+        title: Option<String>,
+        #[arg(long)]
+        description: Option<String>,
+        #[arg(long)]
+        status: Option<String>,
+        #[arg(long)]
+        priority: Option<String>,
+        #[arg(long)]
+        assigned_to: Option<String>,
+        #[arg(long)]
+        progress_pct: Option<i64>,
+        #[arg(long)]
+        task_result: Option<String>,
+        #[arg(long)]
+        outcome_notes: Option<String>,
+        #[arg(long)]
+        actor: Option<String>,
+    },
+    /// Mark a task completed, stamping completed_at.
+    Complete {
+        id: String,
+        #[arg(long)]
+        task_result: Option<String>,
+        #[arg(long)]
+        outcome_notes: Option<String>,
+        #[arg(long)]
+        actor: Option<String>,
     },
 }
 
@@ -1158,6 +1335,92 @@ fn run() -> Result<()> {
                 std::process::exit(2);
             }
         }
+        Command::TerminalSpawn {
+            cwd,
+            title,
+            label,
+            pane,
+            lease_for,
+            lease_ttl_ms,
+            argv,
+        } => {
+            // The shell waits up to 10s for the frontend to mint an id and
+            // another 10s for the pty to reach the registry, so the default
+            // 65s post ceiling is already generous — but be explicit rather
+            // than inheriting a number tuned for `wait`.
+            let v = client.post_with_timeout(
+                "/iyke/terminal/spawn",
+                json!({
+                    "cwd": cwd,
+                    "argv": if argv.is_empty() { None } else { Some(argv) },
+                    "title": title,
+                    "label": label,
+                    "pane": pane,
+                    "lease_for": lease_for,
+                    "lease_ttl_ms": lease_ttl_ms,
+                }),
+                std::time::Duration::from_secs(30),
+            )?;
+            output::print_terminal_spawn(&v, fmt);
+        }
+        Command::TerminalKill {
+            terminal,
+            close_tab,
+        } => {
+            let v = client.post(
+                "/iyke/terminal/kill",
+                json!({ "terminal": terminal, "close_tab": close_tab }),
+            )?;
+            print_write_result("terminal-kill", &v, fmt);
+        }
+        Command::Agent { action } => match action {
+            AgentAction::Register { id, name, model } => {
+                let v = client.post(
+                    "/iyke/agent/register",
+                    json!({ "id": id, "name": name, "model": model }),
+                )?;
+                print_write_result("agent register", &v, fmt);
+            }
+        },
+        Command::Inbox { action } => match action {
+            InboxAction::List {
+                agent_id,
+                since,
+                limit,
+                ack,
+            } => {
+                let mut params = vec![("agent_id", agent_id.clone()), ("since", since.to_string())];
+                if let Some(n) = limit {
+                    params.push(("limit", n.to_string()));
+                }
+                let v = client.get_with_query("/iyke/agent/inbox", &params)?;
+                output::print_inbox(&v, fmt);
+                // Ack AFTER printing: acking deletes, so a failure to render
+                // must not be able to lose entries that were never shown.
+                if ack {
+                    let ids: Vec<String> = v
+                        .get("entries")
+                        .and_then(Value::as_array)
+                        .map(|entries| {
+                            entries
+                                .iter()
+                                .filter_map(|e| e.get("id").and_then(Value::as_str))
+                                .map(str::to_string)
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    if !ids.is_empty() {
+                        let acked = client.post("/iyke/agent/inbox/ack", json!({ "ids": ids }))?;
+                        print_write_result("inbox ack", &acked, fmt);
+                    }
+                }
+            }
+            InboxAction::Ack { ids } => {
+                let v = client.post("/iyke/agent/inbox/ack", json!({ "ids": ids }))?;
+                print_write_result("inbox ack", &v, fmt);
+            }
+        },
+        Command::Task { action } => run_task(&client, action, fmt)?,
         Command::TerminalLabel {
             terminal,
             label,
@@ -1468,6 +1731,123 @@ fn parse_rect(s: &str) -> Result<serde_json::Value> {
         .parse()
         .map_err(|_| anyhow!("rect height not an integer: {s:?}"))?;
     Ok(json!({ "x": 0, "y": 0, "w": w, "h": h }))
+}
+
+fn run_task(client: &Client, action: TaskAction, fmt: Format) -> Result<()> {
+    match action {
+        TaskAction::List {
+            status,
+            assigned_to,
+            project_path,
+            limit,
+        } => {
+            let mut params: Vec<(&str, String)> = Vec::new();
+            if let Some(v) = status {
+                params.push(("status", v));
+            }
+            if let Some(v) = assigned_to {
+                params.push(("assigned_to", v));
+            }
+            if let Some(v) = project_path {
+                params.push(("project_path", v));
+            }
+            if let Some(v) = limit {
+                params.push(("limit", v.to_string()));
+            }
+            let v = client.get_with_query("/iyke/task/list", &params)?;
+            output::print_tasks(&v, fmt);
+        }
+        TaskAction::Create {
+            title,
+            description,
+            status,
+            priority,
+            assigned_to,
+            project_path,
+            due_date,
+            actor,
+        } => {
+            let v = client.post(
+                "/iyke/task/create",
+                json!({
+                    "title": title,
+                    "description": description,
+                    "status": status,
+                    "priority": priority,
+                    "assigned_to": assigned_to,
+                    "project_path": project_path,
+                    "due_date": due_date,
+                    "actor": actor,
+                }),
+            )?;
+            print_write_result("task create", &v, fmt);
+        }
+        TaskAction::Update {
+            id,
+            title,
+            description,
+            status,
+            priority,
+            assigned_to,
+            progress_pct,
+            task_result,
+            outcome_notes,
+            actor,
+        } => {
+            // The shell rejects a no-op update, but catching it here names
+            // the flags the caller actually has rather than echoing a
+            // generic "no fields to update" from the far side of the wire.
+            if title.is_none()
+                && description.is_none()
+                && status.is_none()
+                && priority.is_none()
+                && assigned_to.is_none()
+                && progress_pct.is_none()
+                && task_result.is_none()
+                && outcome_notes.is_none()
+            {
+                return Err(anyhow!(
+                    "nothing to update — pass at least one of: --title, --description, \
+                     --status, --priority, --assigned-to, --progress-pct, --task-result, \
+                     --outcome-notes"
+                ));
+            }
+            let v = client.post(
+                "/iyke/task/update",
+                json!({
+                    "id": id,
+                    "title": title,
+                    "description": description,
+                    "status": status,
+                    "priority": priority,
+                    "assigned_to": assigned_to,
+                    "progress_pct": progress_pct,
+                    "task_result": task_result,
+                    "outcome_notes": outcome_notes,
+                    "actor": actor,
+                }),
+            )?;
+            print_write_result("task update", &v, fmt);
+        }
+        TaskAction::Complete {
+            id,
+            task_result,
+            outcome_notes,
+            actor,
+        } => {
+            let v = client.post(
+                "/iyke/task/complete",
+                json!({
+                    "id": id,
+                    "task_result": task_result,
+                    "outcome_notes": outcome_notes,
+                    "actor": actor,
+                }),
+            )?;
+            print_write_result("task complete", &v, fmt);
+        }
+    }
+    Ok(())
 }
 
 fn run_browser(client: &Client, pkg_id: &str, action: BrowserAction, fmt: Format) -> Result<()> {
@@ -2065,5 +2445,157 @@ mod tests {
             "body.md"
         ])
         .is_err());
+    }
+
+    #[test]
+    fn parses_terminal_spawn_argv_after_separator() {
+        // Everything after `--` is the command, hyphens and all — otherwise
+        // `bun run dev --port 3000` would be eaten as iyke's own flags.
+        let cli = Cli::try_parse_from([
+            "iyke",
+            "terminal-spawn",
+            "--cwd",
+            "/tmp/work",
+            "--label",
+            "builder",
+            "--",
+            "bun",
+            "run",
+            "dev",
+            "--port",
+            "3000",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::TerminalSpawn {
+                cwd, label, argv, ..
+            } => {
+                assert_eq!(cwd.as_deref(), Some("/tmp/work"));
+                assert_eq!(label.as_deref(), Some("builder"));
+                assert_eq!(argv, ["bun", "run", "dev", "--port", "3000"]);
+            }
+            _ => panic!("expected terminal-spawn"),
+        }
+    }
+
+    #[test]
+    fn terminal_spawn_lease_ttl_requires_lease_for() {
+        // A TTL without an agent to lease for silently does nothing, which
+        // reads as "I owned it for 5s" when in fact nothing was ever leased.
+        assert!(Cli::try_parse_from(["iyke", "terminal-spawn", "--lease-ttl-ms", "5000"]).is_err());
+        assert!(Cli::try_parse_from([
+            "iyke",
+            "terminal-spawn",
+            "--lease-for",
+            "orchestrator",
+            "--lease-ttl-ms",
+            "5000",
+        ])
+        .is_ok());
+    }
+
+    #[test]
+    fn parses_terminal_kill_and_close_tab() {
+        let cli =
+            Cli::try_parse_from(["iyke", "terminal-kill", "reviewer", "--close-tab"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::TerminalKill {
+                ref terminal,
+                close_tab: true,
+            } if terminal == "reviewer"
+        ));
+        // Tab retention is the default: killing leaves the exited tab so the
+        // scrollback survives for a post-mortem.
+        let keep = Cli::try_parse_from(["iyke", "terminal-kill", "reviewer"]).unwrap();
+        assert!(matches!(
+            keep.command,
+            Command::TerminalKill {
+                close_tab: false,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn parses_inbox_commands() {
+        let list = Cli::try_parse_from([
+            "iyke",
+            "inbox",
+            "list",
+            "--agent-id",
+            "orchestrator",
+            "--ack",
+        ])
+        .unwrap();
+        match list.command {
+            Command::Inbox {
+                action:
+                    InboxAction::List {
+                        agent_id,
+                        ack,
+                        since,
+                        ..
+                    },
+            } => {
+                assert_eq!(agent_id, "orchestrator");
+                assert!(ack);
+                assert_eq!(since, 0, "a fresh poll starts from the beginning");
+            }
+            _ => panic!("expected inbox list"),
+        }
+
+        let ack = Cli::try_parse_from(["iyke", "inbox", "ack", "--id", "a", "--id", "b"]).unwrap();
+        match ack.command {
+            Command::Inbox {
+                action: InboxAction::Ack { ids },
+            } => assert_eq!(ids, ["a", "b"]),
+            _ => panic!("expected inbox ack"),
+        }
+
+        // Acking nothing is a no-op the shell would accept, but it is far
+        // more likely to be a scripting mistake than an intent.
+        assert!(Cli::try_parse_from(["iyke", "inbox", "ack"]).is_err());
+    }
+
+    #[test]
+    fn parses_task_commands() {
+        let create = Cli::try_parse_from([
+            "iyke",
+            "task",
+            "create",
+            "Ship the control plane",
+            "--priority",
+            "high",
+        ])
+        .unwrap();
+        match create.command {
+            Command::Task {
+                action:
+                    TaskAction::Create {
+                        title, priority, ..
+                    },
+            } => {
+                assert_eq!(title, "Ship the control plane");
+                assert_eq!(priority.as_deref(), Some("high"));
+            }
+            _ => panic!("expected task create"),
+        }
+
+        let complete = Cli::try_parse_from([
+            "iyke",
+            "task",
+            "complete",
+            "task-1",
+            "--task-result",
+            "merged",
+        ])
+        .unwrap();
+        assert!(matches!(
+            complete.command,
+            Command::Task {
+                action: TaskAction::Complete { ref id, ref task_result, .. },
+            } if id == "task-1" && task_result.as_deref() == Some("merged")
+        ));
     }
 }

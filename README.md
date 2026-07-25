@@ -44,6 +44,18 @@ iyke split horizontal                # split the focused pane side-by-side
 iyke focus index 2                   # focus the 2nd leaf pane (matches ⌃2)
 iyke close                           # close the focused pane
 
+# Spawn a terminal and own it from birth (no window in which another
+# writer could get in between the spawn and a separate lease call)
+iyke agent register --name orchestrator
+SPAWN=$(iyke --json terminal-spawn --label builder --lease-for orchestrator \
+  --cwd /home/you/project -- bun run dev)
+TERMINAL=$(jq -r .terminal_id <<<"$SPAWN")
+LEASE=$(jq -r .lease_token <<<"$SPAWN")
+
+# ...work the terminal, then retire it. The tab stays by default, showing
+# its exit status, so the scrollback survives for a post-mortem.
+iyke terminal-kill builder            # add --close-tab to remove the tab too
+
 # Kernel-authoritative terminal orchestration
 TERMINAL=$(iyke --json terminals | jq -r '.[0].terminal_id')
 iyke terminal-label "$TERMINAL" reviewer
@@ -65,6 +77,18 @@ iyke terminal-lease release "$TERMINAL" --token "$LEASE"
 
 iyke scratchpad set --scope project:royalti-co --name handoff --body ready
 iyke scratchpad watch --scope project:royalti-co --name handoff
+
+# Agent inbox — where due timers deliver. `--ack` DELETES what it printed,
+# so a plain re-run returns only what arrived since.
+iyke inbox list --agent-id orchestrator
+CURSOR=$(iyke --json inbox list --agent-id orchestrator | jq -r .next_since)
+iyke inbox list --agent-id orchestrator --since "$CURSOR" --ack
+
+# The durable task board the human works from — outlives any single run
+iyke task create "Ship the control plane" --priority high --assigned-to orchestrator
+iyke task list --status pending
+iyke task update "$TASK_ID" --status in_progress --progress-pct 40
+iyke task complete "$TASK_ID" --task-result "merged in #74"
 ```
 
 Add `--json` to any command for machine-readable output. If the desktop app is not running,
