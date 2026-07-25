@@ -155,6 +155,114 @@ pub fn print_terminals(value: &Value, fmt: Format) {
     }
 }
 
+/// Spawn returns a descriptor plus, optionally, the label/lease it applied.
+/// The lease token is the load-bearing part for an orchestrator, so it gets
+/// its own line rather than being buried in a pretty-printed blob.
+pub fn print_terminal_spawn(value: &Value, fmt: Format) {
+    match fmt {
+        Format::Json => println!("{}", value),
+        Format::Human => {
+            let field = |k: &str| value.get(k).and_then(Value::as_str).unwrap_or("-");
+            println!("terminal  {}", field("terminal_id"));
+            println!("pty       {}", field("pty_id"));
+            println!("status    {}", field("status"));
+            println!("cwd       {}", field("cwd"));
+            if let Some(argv) = value.get("argv").and_then(Value::as_array) {
+                let joined = argv
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                if !joined.is_empty() {
+                    println!("argv      {joined}");
+                }
+            }
+            if value.get("label").is_some() {
+                println!("label     {}", field("label"));
+            }
+            if value.get("lease_token").is_some() {
+                println!("lease     {}", field("lease_token"));
+            }
+            // Label and lease are applied AFTER the pty exists, so either can
+            // fail without failing the spawn. Surface that on stderr — the
+            // terminal is real and usable, but not owned the way you asked.
+            for key in ["label_error", "lease_error"] {
+                if let Some(msg) = value.get(key).and_then(Value::as_str) {
+                    eprintln!("# {key}: {msg}");
+                }
+            }
+        }
+    }
+}
+
+pub fn print_inbox(value: &Value, fmt: Format) {
+    match fmt {
+        Format::Json => println!("{}", value),
+        Format::Human => {
+            let entries = value.get("entries").and_then(Value::as_array);
+            let Some(entries) = entries else {
+                println!("(no entries)");
+                return;
+            };
+            if entries.is_empty() {
+                println!("(no entries)");
+            } else {
+                println!("{:<38} {:<16} {}", "ID", "KIND", "PAYLOAD");
+                for entry in entries {
+                    let id = entry.get("id").and_then(Value::as_str).unwrap_or("?");
+                    let kind = entry.get("kind").and_then(Value::as_str).unwrap_or("?");
+                    // Payload is parsed JSON when it parsed shell-side, else the
+                    // raw string it failed to parse. Render both on one line.
+                    let payload = entry
+                        .get("payload")
+                        .map(|p| match p.as_str() {
+                            Some(s) => s.to_string(),
+                            None => p.to_string(),
+                        })
+                        .unwrap_or_default();
+                    println!("{id:<38} {kind:<16} {payload}");
+                }
+            }
+            // The cursor for the next poll. On stderr so `iyke inbox list`
+            // can be piped without the bookkeeping line contaminating it.
+            if let Some(next) = value.get("next_since").and_then(Value::as_i64) {
+                eprintln!("# next_since {next}");
+            }
+        }
+    }
+}
+
+pub fn print_tasks(value: &Value, fmt: Format) {
+    match fmt {
+        Format::Json => println!("{}", value),
+        Format::Human => {
+            let Some(tasks) = value.get("tasks").and_then(Value::as_array) else {
+                println!("(no tasks)");
+                return;
+            };
+            if tasks.is_empty() {
+                println!("(no tasks)");
+                return;
+            }
+            println!(
+                "{:<38} {:<11} {:<8} {:<14} {}",
+                "ID", "STATUS", "PRIO", "ASSIGNEE", "TITLE"
+            );
+            for task in tasks {
+                let field = |k: &str| task.get(k).and_then(Value::as_str).unwrap_or("-");
+                println!(
+                    "{:<38} {:<11} {:<8} {:<14} {}",
+                    field("id"),
+                    field("status"),
+                    field("priority"),
+                    field("assigned_to"),
+                    field("title")
+                );
+            }
+        }
+    }
+}
+
 pub fn print_windows(value: &Value, fmt: Format) {
     match fmt {
         Format::Json => println!("{}", value),
