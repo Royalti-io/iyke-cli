@@ -851,6 +851,10 @@ enum ChiAction {
         /// Timeout in seconds. Currently reserved.
         #[arg(long)]
         timeout: Option<u32>,
+        /// Launch via tmux so the session survives an Ikenga app restart.
+        /// Use `iyke chi attach <run_id>` to reconnect later.
+        #[arg(long, default_value_t = false)]
+        persistent: bool,
     },
     /// Continue an existing agent run with a new prompt.
     Resume {
@@ -876,6 +880,13 @@ enum ChiAction {
     /// Cancel a running agent run.
     Cancel {
         /// Run id.
+        run_id: String,
+    },
+    /// Attach (or re-attach) to the tmux session backing a persistent chi run.
+    /// The chi run must have been started with --persistent (or via Ikenga with
+    /// tmux persistence enabled). Spawns `tmux attach-session -t <run_id>`.
+    Attach {
+        /// Run id returned by `iyke chi run`.
         run_id: String,
     },
 }
@@ -2284,6 +2295,7 @@ fn run_chi(client: &Client, action: ChiAction, fmt: Format) -> Result<()> {
             parent_id,
             resume_session_id,
             timeout,
+            persistent,
         } => {
             let body = json!({
                 "engineId": engine_id,
@@ -2294,6 +2306,7 @@ fn run_chi(client: &Client, action: ChiAction, fmt: Format) -> Result<()> {
                 "parentId": parent_id,
                 "resumeSessionId": resume_session_id,
                 "timeoutSeconds": timeout,
+                "persistent": persistent,
             });
             let v = client.post_with_timeout(
                 "/iyke/chi/run",
@@ -2324,6 +2337,50 @@ fn run_chi(client: &Client, action: ChiAction, fmt: Format) -> Result<()> {
         ChiAction::Cancel { run_id } => {
             let v = client.post("/iyke/chi/cancel", json!({"runId": run_id}))?;
             output::print_chi_result(&v, fmt);
+        }
+        ChiAction::Attach { run_id } => {
+            // Check that the run has a terminal_session_id (i.e. was started
+            // with tmux persistence). If the field is absent or null we bail
+            // early with a clear message rather than spawning a shell.
+            let status = client.get_with_query("/iyke/chi/status", &[("runId", run_id.clone())])?;
+            let ts_id = status
+                .get("terminal_session_id")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            let session = ts_id.unwrap_or_else(|| run_id.clone());
+
+            // Verify the tmux session exists before attaching.
+            let check = std::process::Command::new("tmux")
+                .args(["has-session", "-t", &session])
+                .status();
+            match check {
+                Ok(s) if s.success() => {}
+                _ => {
+                    eprintln!("iyke chi attach: tmux session '{session}' not found.");
+                    eprintln!("The run may have already finished, or was not started with persistence.");
+                    std::process::exit(1);
+                }
+            }
+
+            // Replace this process with tmux attach.
+            #[cfg(unix)]
+            {
+                use std::ffi::CString;
+                let tmux = CString::new("tmux").unwrap();
+                let attach = CString::new("attach-session").unwrap();
+                let flag_t = CString::new("-t").unwrap();
+                let sess = CString::new(session.as_str()).unwrap();
+                let args = [tmux.as_ptr(), attach.as_ptr(), flag_t.as_ptr(), sess.as_ptr(), std::ptr::null()];
+                unsafe { libc::execvp(tmux.as_ptr(), args.as_ptr()); }
+                eprintln!("iyke chi attach: execvp tmux failed");
+                std::process::exit(1);
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = std::process::Command::new("tmux")
+                    .args(["attach-session", "-t", &session])
+                    .status();
+            }
         }
     }
     Ok(())
@@ -2842,5 +2899,40 @@ mod tests {
             write!(buf, "{}" , value).unwrap();
         }
         assert!(!buf.is_empty());
+    }
+
+    #[test]
+    fn parses_chi_run_persistent() {
+        let cli = Cli::try_parse_from([
+            "iyke",
+            "chi",
+            "run",
+            "claude-code",
+            "--prompt",
+            "hello",
+            "--persistent",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Chi {
+                action: ChiAction::Run {
+                    ref engine_id,
+                    persistent: true,
+                    ..
+                },
+            } if engine_id == "claude-code"
+        ));
+    }
+
+    #[test]
+    fn parses_chi_attach() {
+        let cli = Cli::try_parse_from(["iyke", "chi", "attach", "run-abc"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Chi {
+                action: ChiAction::Attach { ref run_id },
+            } if run_id == "run-abc"
+        ));
     }
 }

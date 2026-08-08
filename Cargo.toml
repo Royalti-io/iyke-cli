@@ -10,6 +10,10 @@ authors = ["Royalti"]
 name = "iyke"
 path = "src/main.rs"
 
+[[bin]]
+name = "chi-runner"
+path = "src/chi_runner.rs"
+
 [dependencies]
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
