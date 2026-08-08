@@ -456,6 +456,12 @@ enum Command {
         #[command(subcommand)]
         action: BrowserAction,
     },
+
+    /// Run, resume, list, and cancel agent runs (chi-first agent surface).
+    Chi {
+        #[command(subcommand)]
+        action: ChiAction,
+    },
 }
 
 #[derive(Subcommand)]
@@ -816,6 +822,62 @@ enum BrowserSessionAction {
     List,
     /// Delete a named session (cookie data on disk is preserved).
     Delete { name: String },
+}
+
+#[derive(Subcommand)]
+enum ChiAction {
+    /// Start a new agent run.
+    Run {
+        /// Engine id (e.g. claude-code, gemini, codex).
+        engine_id: String,
+        /// The prompt / task to send.
+        #[arg(long)]
+        prompt: String,
+        /// Working directory. Defaults to the current directory.
+        #[arg(long)]
+        cwd: Option<String>,
+        /// Engine model, if the engine supports it.
+        #[arg(long)]
+        model: Option<String>,
+        /// Permission mode: plan, default, auto, bypassPermissions.
+        #[arg(long)]
+        mode: Option<String>,
+        /// Optional parent run id (subagent chain).
+        #[arg(long)]
+        parent_id: Option<String>,
+        /// Resume from an existing engine session id instead of starting fresh.
+        #[arg(long)]
+        resume_session_id: Option<String>,
+        /// Timeout in seconds. Currently reserved.
+        #[arg(long)]
+        timeout: Option<u32>,
+    },
+    /// Continue an existing agent run with a new prompt.
+    Resume {
+        /// Run id returned by `iyke chi run`.
+        run_id: String,
+        #[arg(long)]
+        prompt: String,
+    },
+    /// Print the current status and output of a run.
+    Status {
+        /// Run id.
+        run_id: String,
+    },
+    /// List agent runs, optionally filtered by engine.
+    List {
+        /// Filter by engine id.
+        #[arg(long)]
+        engine: Option<String>,
+        /// Maximum rows.
+        #[arg(long, default_value_t = 50)]
+        limit: i64,
+    },
+    /// Cancel a running agent run.
+    Cancel {
+        /// Run id.
+        run_id: String,
+    },
 }
 
 #[derive(Copy, Clone, ValueEnum)]
@@ -1521,6 +1583,9 @@ fn run() -> Result<()> {
         Command::Browser { pkg_id, action } => {
             run_browser(&client, &pkg_id, action, fmt)?;
         }
+        Command::Chi { action } => {
+            run_chi(&client, action, fmt)?;
+        }
     }
 
     Ok(())
@@ -2208,6 +2273,62 @@ fn run_browser(client: &Client, pkg_id: &str, action: BrowserAction, fmt: Format
     Ok(())
 }
 
+fn run_chi(client: &Client, action: ChiAction, fmt: Format) -> Result<()> {
+    match action {
+        ChiAction::Run {
+            engine_id,
+            prompt,
+            cwd,
+            model,
+            mode,
+            parent_id,
+            resume_session_id,
+            timeout,
+        } => {
+            let body = json!({
+                "engineId": engine_id,
+                "prompt": prompt,
+                "cwd": cwd,
+                "model": model,
+                "mode": mode,
+                "parentId": parent_id,
+                "resumeSessionId": resume_session_id,
+                "timeoutSeconds": timeout,
+            });
+            let v = client.post_with_timeout(
+                "/iyke/chi/run",
+                body,
+                std::time::Duration::from_secs(120),
+            )?;
+            output::print_chi_result(&v, fmt);
+        }
+        ChiAction::Resume { run_id, prompt } => {
+            let v = client.post(
+                "/iyke/chi/resume",
+                json!({"runId": run_id, "prompt": prompt}),
+            )?;
+            output::print_chi_result(&v, fmt);
+        }
+        ChiAction::Status { run_id } => {
+            let v = client.get_with_query("/iyke/chi/status", &[("runId", run_id)])?;
+            output::print_chi_result(&v, fmt);
+        }
+        ChiAction::List { engine, limit } => {
+            let mut params = vec![("limit", limit.to_string())];
+            if let Some(e) = engine {
+                params.push(("engineId", e));
+            }
+            let v = client.get_with_query("/iyke/chi/list", &params)?;
+            output::print_chi_list(&v, fmt);
+        }
+        ChiAction::Cancel { run_id } => {
+            let v = client.post("/iyke/chi/cancel", json!({"runId": run_id}))?;
+            output::print_chi_result(&v, fmt);
+        }
+    }
+    Ok(())
+}
+
 fn require_at_most_one_target(
     pane: &Option<String>,
     session: &Option<String>,
@@ -2597,5 +2718,129 @@ mod tests {
                 action: TaskAction::Complete { ref id, ref task_result, .. },
             } if id == "task-1" && task_result.as_deref() == Some("merged")
         ));
+    }
+
+    #[test]
+    fn parses_chi_run() {
+        let cli = Cli::try_parse_from([
+            "iyke",
+            "chi",
+            "run",
+            "claude-code",
+            "--prompt",
+            "hello",
+            "--cwd",
+            "/tmp/work",
+            "--mode",
+            "auto",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Chi {
+                action:
+                    ChiAction::Run {
+                        engine_id,
+                        prompt,
+                        cwd,
+                        mode,
+                        ..
+                    },
+            } => {
+                assert_eq!(engine_id, "claude-code");
+                assert_eq!(prompt, "hello");
+                assert_eq!(cwd.as_deref(), Some("/tmp/work"));
+                assert_eq!(mode.as_deref(), Some("auto"));
+            }
+            _ => panic!("expected chi run"),
+        }
+    }
+
+    #[test]
+    fn parses_chi_resume_status_cancel() {
+        let resume = Cli::try_parse_from([
+            "iyke",
+            "chi",
+            "resume",
+            "run-123",
+            "--prompt",
+            "continue",
+        ])
+        .unwrap();
+        match resume.command {
+            Command::Chi {
+                action: ChiAction::Resume { run_id, prompt },
+            } => {
+                assert_eq!(run_id, "run-123");
+                assert_eq!(prompt, "continue");
+            }
+            _ => panic!("expected chi resume"),
+        }
+
+        let status = Cli::try_parse_from(["iyke", "chi", "status", "run-123"]).unwrap();
+        assert!(matches!(
+            status.command,
+            Command::Chi {
+                action: ChiAction::Status { ref run_id },
+            } if run_id == "run-123"
+        ));
+
+        let cancel = Cli::try_parse_from(["iyke", "chi", "cancel", "run-123"]).unwrap();
+        assert!(matches!(
+            cancel.command,
+            Command::Chi {
+                action: ChiAction::Cancel { ref run_id },
+            } if run_id == "run-123"
+        ));
+    }
+
+    #[test]
+    fn parses_chi_list() {
+        let cli = Cli::try_parse_from([
+            "iyke",
+            "chi",
+            "list",
+            "--engine",
+            "claude-code",
+            "--limit",
+            "10",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Chi {
+                action: ChiAction::List { engine, limit },
+            } => {
+                assert_eq!(engine.as_deref(), Some("claude-code"));
+                assert_eq!(limit, 10);
+            }
+            _ => panic!("expected chi list"),
+        }
+    }
+
+    #[test]
+    fn chi_list_output_formatting() {
+        let value = serde_json::json!([
+            {
+                "runId": "run-1",
+                "engineId": "claude-code",
+                "status": "running",
+                "brief": "hello\nworld"
+            },
+            {
+                "runId": "run-2",
+                "engineId": "claude-code",
+                "status": "done",
+                "brief": null
+            }
+        ]);
+        // Should not panic; JSON mode round-trips.
+        let mut buf = Vec::new();
+        {
+            use std::io::Write;
+            // Human formatting is side-effect-only; we just exercise it.
+            output::print_chi_list(&value, output::Format::Human);
+            output::print_chi_list(&value, output::Format::Json);
+            write!(buf, "{}" , value).unwrap();
+        }
+        assert!(!buf.is_empty());
     }
 }

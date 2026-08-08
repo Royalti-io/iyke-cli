@@ -232,6 +232,68 @@ pub fn print_inbox(value: &Value, fmt: Format) {
     }
 }
 
+/// Run/resume/cancel result: print the run id and status; if the output is
+/// already available, print it below.
+pub fn print_chi_result(value: &Value, fmt: Format) {
+    match fmt {
+        Format::Json => println!("{}", value),
+        Format::Human => {
+            let field = |k: &str| value.get(k).and_then(Value::as_str).unwrap_or("?");
+            println!("run_id    {}", field("runId"));
+            println!("status    {}", field("status"));
+            if let Some(output) = value.get("output").and_then(Value::as_str) {
+                if !output.is_empty() {
+                    println!("---");
+                    print!("{output}");
+                    if !output.ends_with('\n') {
+                        println!();
+                    }
+                }
+            }
+            if let Some(err) = value.get("error").and_then(Value::as_str) {
+                eprintln!("error: {err}");
+            }
+        }
+    }
+}
+
+pub fn print_chi_list(value: &Value, fmt: Format) {
+    match fmt {
+        Format::Json => println!("{}", value),
+        Format::Human => {
+            let rows = value.as_array();
+            let Some(rows) = rows else {
+                println!("(no runs)");
+                return;
+            };
+            if rows.is_empty() {
+                println!("(no runs)");
+                return;
+            }
+            println!(
+                "{:<38} {:<14} {:<16} {}",
+                "RUN_ID", "ENGINE", "STATUS", "BRIEF"
+            );
+            for row in rows {
+                let run_id = row.get("runId").and_then(Value::as_str).unwrap_or("?");
+                let engine = row.get("engineId").and_then(Value::as_str).unwrap_or("?");
+                let status = row.get("status").and_then(Value::as_str).unwrap_or("?");
+                let brief = row
+                    .get("brief")
+                    .and_then(Value::as_str)
+                    .unwrap_or("-")
+                    .replace('\n', " ");
+                let brief = if brief.len() > 40 {
+                    format!("{}…", &brief[..39])
+                } else {
+                    brief
+                };
+                println!("{run_id:<38} {engine:<14} {status:<16} {brief}");
+            }
+        }
+    }
+}
+
 pub fn print_tasks(value: &Value, fmt: Format) {
     match fmt {
         Format::Json => println!("{}", value),
