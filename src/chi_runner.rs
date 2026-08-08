@@ -163,6 +163,25 @@ fn build_command(conf: &RunnerConf) -> Result<Command, String> {
             }
             Ok(cmd)
         }
+        // Codex: `codex exec --json` (new) or `codex exec resume <id> --json`.
+        // `-` means "read prompt from stdin". `--skip-git-repo-check` avoids
+        // refusing to run outside a git repo (a common setup in ci / agent dirs).
+        "codex" => {
+            let mut cmd = Command::new("codex");
+            if let Some(id) = &conf.resume_session_id {
+                cmd.args(["exec", "resume", id.as_str(), "--json"]);
+            } else {
+                cmd.args(["exec", "--json"]);
+            }
+            cmd.args(["--skip-git-repo-check", "--cd", &conf.cwd, "-"])
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
+            if let Some(m) = &conf.model {
+                cmd.arg("--model").arg(m);
+            }
+            Ok(cmd)
+        }
         other => Err(format!("engine not supported by chi-runner: {other}")),
     }
 }
@@ -220,6 +239,13 @@ fn run(conf: RunnerConf) -> i32 {
             let _ = stdin.write_all(envelope.as_bytes());
             let _ = stdin.flush();
             // Drop stdin → EOF on the child side.
+        }
+    } else if conf.engine_id == "codex" {
+        // Codex reads the plain prompt text from stdin; no JSON envelope.
+        if let Some(mut stdin) = child.stdin.take() {
+            let _ = stdin.write_all(conf.prompt.as_bytes());
+            let _ = stdin.flush();
+            // Drop stdin → EOF so codex knows the prompt is complete.
         }
     } else {
         // antigravity-cli gets the prompt via --prompt flag; close stdin.
@@ -290,6 +316,45 @@ fn run(conf: RunnerConf) -> i32 {
                     }
                     "result" => {
                         saw_done = true;
+                    }
+                    // Codex JSONL events (keyed by `type` as well).
+                    "thread.started" => {
+                        if let Some(id) = val.get("thread_id").and_then(|v| v.as_str()) {
+                            if external_id.is_none() {
+                                external_id = Some(id.to_string());
+                                state.external_id = Some(id.to_string());
+                            }
+                        }
+                    }
+                    "turn.completed" => {
+                        saw_done = true;
+                    }
+                    "turn.failed" => {
+                        saw_done = true;
+                        if let Some(msg) = val
+                            .get("error")
+                            .and_then(|e| e.get("message"))
+                            .and_then(|v| v.as_str())
+                        {
+                            output.push_str(&format!("[error] {msg}\n"));
+                        }
+                    }
+                    // Codex item events: extract agent_message text.
+                    "item.completed" | "item.updated" => {
+                        if let Some(item) = val.get("item").and_then(|v| v.as_object()) {
+                            let itype = item
+                                .get("item_type")
+                                .or_else(|| item.get("type"))
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("");
+                            if itype == "agent_message" {
+                                if let Some(text) = item.get("text").and_then(|v| v.as_str()) {
+                                    if !text.is_empty() {
+                                        output.push_str(text);
+                                    }
+                                }
+                            }
+                        }
                     }
                     _ => {}
                 }
