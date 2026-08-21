@@ -1,6 +1,6 @@
 # iyke
 
-[![Version](https://img.shields.io/badge/version-v0.0.0-blue.svg)](https://github.com/Royalti-io/iyke-cli/releases)
+[![Version](https://img.shields.io/badge/version-v0.0.0-blue.svg)](https://github.com/ikenga-hq/iyke-cli/releases)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
 > `iyke` — the runtime controller for a running Ikenga shell. Drive panes, modes, tabs, and
@@ -14,7 +14,7 @@ reads the control file the app writes and forwards subcommands as authenticated 
 it to navigate, switch modes, open tabs, and inspect UI state from a script.
 
 It's one of two Ikenga CLIs — the **runtime** one. (The other,
-[`ikenga`](https://github.com/Royalti-io/ikenga-cli), manages packages on disk. They share
+[`ikenga`](https://github.com/ikenga-hq/ikenga-cli), manages packages on disk. They share
 no code.)
 
 ## Install
@@ -113,8 +113,8 @@ control file; if you write your own harness, do the same.
 
 ## Links
 
-- [`ikenga-cli`](https://github.com/Royalti-io/ikenga-cli) — the package manager (the *other* CLI)
-- [`ikenga`](https://github.com/Royalti-io/ikenga) — the desktop shell it controls
+- [`ikenga-cli`](https://github.com/ikenga-hq/ikenga-cli) — the package manager (the *other* CLI)
+- [`ikenga`](https://github.com/ikenga-hq/ikenga) — the desktop shell it controls
 
 ## License
 
